@@ -1,0 +1,38 @@
+{
+    "cmsis-csolution.actions": [
+        {
+            "path": "afireflyest.csolution.yml",
+            "target": "STM32F401RCTx",
+            "projects": [
+                {
+                    "path": "flight_control/flight_control.cproject.yml",
+                    "config": {
+                        "run": "Flash Device",
+                        "debug": "Arm Debugger"
+                    }
+                }
+            ]
+        }
+    ],
+    "files.associations": {
+        "main.h": "c",
+        "stm32f4xx.h": "c"
+    },
+    "debug.hideSlowPreLaunchWarning": true,
+    "debug.showInStatusBar": "never",
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/**",
+        "C:/Users/frostTide/AppData/Local/arm/packs/ARM/CMSIS/6.3.0/CMSIS/Core/Include",
+        "C:/Users/frostTide/AppData/Local/arm/packs/ARM/CMSIS-DSP/1.11.0/Include"
+    ],
+    "C_Cpp.default.compilerPath": "E:/Arm/GNU Toolchain mingw-w64-i686-arm-none-eabi/bin/arm-none-eabi-gcc.exe",
+    "C_Cpp.default.intelliSenseMode": "windows-gcc-arm",
+    "C_Cpp.default.defines": [
+        "STM32F401xx"
+    ],
+    "C_Cpp.default.compilerArgs": [
+        "-mcpu=cortex-m4",
+        "-mfloat-abi=hard",
+        "-mfpu=fpv4-sp-d16"
+    ]
+}

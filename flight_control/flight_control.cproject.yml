@@ -1,0 +1,117 @@
+# A project translates into one executable or library.
+project:
+  
+  processor:
+    fpu: sp
+
+  misc:
+    - for-compiler: GCC
+      Library:
+        - m
+  
+  define:
+    - STM32F401xx
+
+  groups:
+    - group: STM32F4xx StdPeriph Driver Files
+      files:
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/misc.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_adc.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_can.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_crc.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_dac.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_dbgmcu.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_dcmi.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_dma.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_exti.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_flash.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_gpio.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_i2c.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_iwdg.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_pwr.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_rcc.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_rng.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_rtc.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_sdio.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_spi.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_syscfg.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_tim.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_usart.c
+        - file: ./Drivers/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_wwdg.c
+    - group: Device Files
+      files:
+        - file: ./Drivers/CMSIS/Device/STM32F4xx/Source/Templates/system_stm32f4xx.c
+        - file: ./Drivers/CMSIS/Device/STM32F4xx/Source/Templates/startup_stm32f401xc.s
+        - file: ./Drivers/BSP/src/board.c
+        - file: ./Drivers/BSP/src/dma.c
+        - file: ./Drivers/BSP/src/oled.c
+        - file: ./Drivers/BSP/src/persistence.c
+        - file: ./Drivers/BSP/src/spi_sensor.c
+        - file: ./Drivers/BSP/src/icm20948.c
+        - file: ./Drivers/BSP/src/bmp280.c
+    - group: Middlewares Files
+      files:
+        - file: ./Middlewares/Algorithm/src/lowpass.c
+        - file: ./Middlewares/Algorithm/src/pid.c
+        - file: ./Middlewares/Algorithm/src/spatial_math.c
+        - file: ./Middlewares/Algorithm/src/ekf_state7.c
+        # - file: ./Middlewares/Algorithm/src/ekf_state6.c
+        - file: ./Middlewares/Modules/src/battery.c
+        - file: ./Middlewares/Modules/src/ble.c
+        - file: ./Middlewares/Modules/src/calibrate_accel.c
+        - file: ./Middlewares/Modules/src/fps.c
+        - file: ./Middlewares/Modules/src/key.c
+        - file: ./Middlewares/Modules/src/led.c
+        - file: ./Middlewares/Modules/src/pwm.c
+        - file: ./Middlewares/src/math3d.c
+        - file: ./Middlewares/Modules/src/attitude.c
+        - file: ./Middlewares/Modules/src/command.c
+        - file: ./Middlewares/Modules/src/control.c
+        - file: ./Middlewares/ThirdParty/FreeRTOS-Kernel/portable/GCC/ARM_CM4F/port.c
+        - file: ./Middlewares/ThirdParty/FreeRTOS-Kernel/portable/MemMang/heap_4.c
+        - file: ./Middlewares/ThirdParty/FreeRTOS-Kernel/tasks.c
+        - file: ./Middlewares/ThirdParty/FreeRTOS-Kernel/queue.c
+        - file: ./Middlewares/ThirdParty/FreeRTOS-Kernel/list.c
+        - file: ./Middlewares/ThirdParty/FreeRTOS-Kernel/timers.c
+        - file: ./Middlewares/ThirdParty/FreeRTOS-Kernel/event_groups.c
+        - file: ./Middlewares/ThirdParty/FreeRTOS-Kernel/stream_buffer.c
+        - file: ./Middlewares/UI/src/bmp.c
+        - file: ./Middlewares/UI/src/font.c
+        - file: ./Middlewares/UI/src/gfx.c
+        - file: ./Middlewares/UI/src/navigator.c
+        - file: ./Middlewares/UI/src/ui.c
+    - group: User Files
+      files:
+        - file: ./User/src/main.c
+        - file: ./User/src/syscalls.c
+        - file: ./User/src/stm32f4xx_it.c
+
+  add-path:
+    - ./User/inc
+    - ./Drivers/STM32F4xx_StdPeriph_Driver/inc
+    - ./Drivers/CMSIS/Device/STM32F4xx/Include
+    - ./Drivers/CMSIS/Device/STM32F4xx/Source/Templates
+    - ./Drivers/BSP/inc
+    - ./Middlewares/inc
+    - ./Middlewares/Algorithm/inc
+    - ./Middlewares/Modules/inc
+    - ./Middlewares/Protocol/inc
+    - ./Middlewares/UI/inc
+    - ./Middlewares/ThirdParty/inc
+    - ./Middlewares/display
+    - ./Middlewares/ThirdParty/FreeRTOS-Kernel/include
+    - ./Middlewares/ThirdParty/FreeRTOS-Kernel/portable/GCC/ARM_CM4F/
+
+  # List components to use for your application.
+  # A software component is a re-usable unit that may be configurable.
+  components:
+    - component: ARM::CMSIS:CORE
+    - component: CMSIS:DSP&Source
+
+  # List executable file formats to be generated.
+  output:
+    type:
+      - elf
+      - hex
+  packs:
+    - pack: ARM::CMSIS-DSP@1.11.0
