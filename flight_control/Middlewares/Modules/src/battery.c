@@ -36,7 +36,7 @@ void Battery_ADC_Init(void) {
     ADC_InitStructure.ADC_ScanConvMode = DISABLE;
     ADC_InitStructure.ADC_ContinuousConvMode = DISABLE;
     ADC_InitStructure.ADC_ExternalTrigConvEdge = ADC_ExternalTrigConvEdge_None;
-    ADC_InitStructure.ADC_DataAlign = ADC_DataAlign_Right;
+    ADC_InitStructure.ADC_DataAlign = ADC_DataAlign_Left;
     ADC_InitStructure.ADC_NbrOfConversion = 1;
     ADC_Init(ADC1, &ADC_InitStructure);
 
@@ -58,14 +58,7 @@ void Battery_Measure_Reset(void) {
 
 void Battery_Measure_Step(void) {
     if (pwr_state == PWR_STATE_PREPARE) {
-        GPIO_InitTypeDef GPIO_InitStructure;
-        GPIO_InitStructure.GPIO_Pin = GPIO_PWR_AUX_PIN;
-        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_OUT;
-        GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
-        GPIO_InitStructure.GPIO_Speed = GPIO_Speed_2MHz;
-        GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;
-        GPIO_Init(GPIO_PWR_AUX, &GPIO_InitStructure);
-        GPIO_SetBits(GPIO_PWR_AUX, GPIO_PWR_AUX_PIN);
+        GPIO_SetBits(GPIO_PWR_AUX, GPIO_PWR_AUX_PIN);  // 开启分压器
         pwr_state = PWR_STATE_WAIT_RC;
     } else if (pwr_state == PWR_STATE_WAIT_RC) {
         rc_counter++;
@@ -82,11 +75,18 @@ void Battery_Measure_Step(void) {
     } else if (pwr_state == PWR_STATE_DISABLE) {
         GPIO_ResetBits(GPIO_PWR_AUX, GPIO_PWR_AUX_PIN);
         disable_counter++;
-        if (disable_counter >= 1000) {
+        if (disable_counter >= 60) {
             disable_counter = 0;
             pwr_state = PWR_STATE_PREPARE;
         }
     }
+
+    // // 强制常开分压器
+    // GPIO_SetBits(GPIO_PWR_AUX, GPIO_PWR_AUX_PIN);
+
+    // // 读 ADC
+    // ADC_RegularChannelConfig(ADC1, ADC_Channel_10, 1, ADC_SampleTime_480Cycles);
+    // ADC_SoftwareStartConv(ADC1);
 }
 
 uint8_t Battery_GetPercentage(void) {

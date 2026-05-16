@@ -19,6 +19,14 @@ solution:
   target-types:
     - type: STM32F401RCTx
       device: STM32F401RCTx
+      target-set:
+        - set:
+          images:
+            - project-context: flight_control.Debug
+          debugger:
+            name: ST-Link@pyOCD
+            clock: 4000000
+            protocol: swd
 
   # List of different build configurations.
   build-types:

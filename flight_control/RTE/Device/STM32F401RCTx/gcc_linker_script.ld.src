@@ -87,11 +87,20 @@ MEMORY
  */
 ENTRY(Reset_Handler)
 
+/* Aliases for ST startup file */
+_estack = __StackTop;
+_sdata  = __data_start__;
+_edata  = __data_end__;
+_sidata = __etext;
+_sbss   = __bss_start__;
+_ebss   = __bss_end__;
+
 SECTIONS
 {
   .text :
   {
     KEEP(*(.vectors))
+    KEEP(*(.isr_vector))
     *(.text*)
 
     KEEP(*(.init))
@@ -306,10 +315,3 @@ SECTIONS
   /* Check if data + heap + stack exceeds RAM limit */
   ASSERT(__StackLimit >= __HeapLimit, "region RAM overflowed with stack")
 }
-
-PROVIDE(_estack  = __StackTop);
-PROVIDE(_sdata   = __data_start__);
-PROVIDE(_edata   = __data_end__);
-PROVIDE(_sidata  = __etext);
-PROVIDE(_sbss    = __bss_start__);
-PROVIDE(_ebss    = __bss_end__);

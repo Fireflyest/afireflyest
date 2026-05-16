@@ -339,5 +339,8 @@ void UI_Battery_Draw(UI_Widget* widget) {
         snprintf(buf, sizeof(buf), "N/A");
     }
     GFX_DrawString(iconX - 34, iconY + 10, buf, GFX_COLOR_WHITE);
+
+    snprintf(buf, sizeof(buf), "status %d", pwr_state);
+    GFX_DrawString(iconX - 34, iconY + 20, buf, GFX_COLOR_WHITE);
     
 }
