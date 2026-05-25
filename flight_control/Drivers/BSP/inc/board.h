@@ -12,9 +12,12 @@
 #define SPI_SENSOR SPI2
 #define GPIO_IMU_SPI GPIOB
 #define GPIO_IMU_SPI_CS_PIN GPIO_Pin_12
-#define BMP280
-#define GPIO_BMP_SPI GPIOA
-#define GPIO_BMP_SPI_CS_PIN GPIO_Pin_5
+#define SENSOR_BARO
+#define GPIO_BARO_SPI GPIOC
+#define GPIO_BARO_SPI_CS_PIN GPIO_Pin_2
+#define SENSOR_MAG
+#define GPIO_MAG_SPI GPIOD
+#define GPIO_MAG_SPI_CS_PIN GPIO_Pin_2
 
 #define GPIO_PWR_AUX GPIOC
 #define GPIO_PWR_AUX_PIN GPIO_Pin_1
@@ -42,7 +45,7 @@ void Battery_GPIO_Init(void);
 /**
  * @brief Initialize the GPIO pins for SPI2
  * SPI2: SCK (PB13), MISO (PB14), MOSI (PB15)
- * ICM-20948 CS (PB12), BMP280 CS (PA5)
+ * IMU CS (PB12), BARO CS (PC2), MAG CS (PD2)
  */
 void SPI_Sensor_GPIO_Init(void);
 
@@ -63,6 +66,12 @@ void UART1_GPIO_Init(void);
  * UART2: TX (PA2), RX (PA3)
  */
 void UART2_GPIO_Init(void);
+
+/**
+ * @brief Initialize the GPIO pins for UART6
+ * UART6: TX (PA11), RX (PA12)
+ */
+void UART6_GPIO_Init(void);
 
 /**
  * @brief Initialize the GPIO pins for OLED

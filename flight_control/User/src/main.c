@@ -77,27 +77,77 @@ int main() {
     Init_DMA_For_USART1_RX(bleRxBuffer, sizeof(bleRxBuffer));
     Init_DMA_For_USART1_TX(bleTxBuffer);
     UART1_GPIO_Init();
+    UART2_GPIO_Init();
     BLE_Init(BLE_BAUDRATE_115200);
+    ExtraSensor_Init(ES_BAUDRATE_115200);
     UI_Logger_AddLine(&logWindow, "UART Init OK");
 
     SPI_Sensor_GPIO_Init();
     SPI_Sensor_Init();
-    ICM20948_Init();
-    BMP280_Init();
+
+    bmi260_raw_xyz_t acc, gyr;
+    // uint8_t imu_sensor_id = SPI_Sensor_Register(GPIO_IMU_SPI, GPIO_IMU_SPI_CS_PIN);
+    // int8_t imu_ret = BMI_Init(imu_sensor_id);
+
+    bmi260_dev_t bmi;
+    bmi.sensor_id = SPI_Sensor_Register(GPIO_IMU_SPI, GPIO_IMU_SPI_CS_PIN);
+    BMI260_SetDelay(Delay_ms);
+    int8_t imu_ret = BMI260_Init(&bmi);
+
+    bmp580_dev_t bmp580;
+    bmp580_data_t baro_data;
+    bmp580.sensor_id = SPI_Sensor_Register(GPIO_BARO_SPI, GPIO_BARO_SPI_CS_PIN);
+    BMP580_SetDelay(Delay_ms);
+    int8_t bmp580_ret = BMP580_Init(&bmp580);
+
+    mmc5983ma_dev_t mmc;
+    mmc5983ma_data_t mag_data;
+    mmc.sensor_id = SPI_Sensor_Register(GPIO_MAG_SPI, GPIO_MAG_SPI_CS_PIN);
+    MMC5983MA_SetDelay(Delay_ms);
+    int8_t mmc_ret = MMC5983MA_Init(&mmc);
+
+    BMP580_ConfigMeasurement(&bmp580,
+                             BMP580_OSR_16X, /* 压力 16x 过采样 */
+                             BMP580_OSR_1X,  /* 温度 1x */
+                             BMP580_ODR_32HZ,
+                             1); /* 使能压力 */
+    BMP580_ConfigIIR(&bmp580,
+                     BMP580_IIR_COEFF_3, /* 压力 IIR coeff=3 */
+                     BMP580_IIR_BYPASS,  /* 温度不滤波 */
+                     1);
+    BMP580_ForcedMeasure(&bmp580, &baro_data);
+    float sea_level_p = BMP580_AltitudeToSeaLevelPressure(
+        baro_data.pressure_pa,
+        baro_data.temperature_deg,
+        50.0f);
+    float altitude = BMP580_PressureToAltitudeWithTemp(
+        baro_data.pressure_pa,
+        baro_data.temperature_deg,
+        sea_level_p);
+    init_altitude = altitude;  // 以初始压力作为基准高度
+    init_temperature = baro_data.temperature_deg;
+    BMP580_SetPowerMode(&bmp580, BMP580_MODE_NORMAL);
+
+    MMC5983MA_SetBandwidth(&mmc, MMC_BW_00); /* 8ms, 最低噪声 0.4mG */
+    MMC5983MA_EnableAutoSR(&mmc, 1);
+    MMC5983MA_EnableContinuousMode(&mmc, MMC_CM_FREQ_100HZ, MMC_PRD_SET_100);
+
     Delay_ms(50);
     // Init_DMA_For_IMU_SPI2_TIM2(imu_tx_buf, imu_rx_buf);
     UI_Logger_AddLine(&logWindow, "Sensor Init OK");
-    uint8_t who_am_i = ICM20948_Read_WhoAmI();
-    uint8_t mag_who_am_i = ICM20948_Read_MagWhoAmI();
-    uint8_t bmp_who_am_i = BMP280_Read_WhoAmI();
+    uint8_t imu_who_am_i;
+    BMI260_WhoAmI(&bmi, &imu_who_am_i);
+    uint8_t bmp_who_am_i;
+    BMP580_WhoAmI(&bmp580, &bmp_who_am_i);
+    uint8_t mag_who_am_i;
+    MMC5983MA_WhoAmI(&mmc, &mag_who_am_i);
     char buf[64];
-    snprintf(buf, sizeof(buf), "ICM20948: 0x%02X", who_am_i);
+    snprintf(buf, sizeof(buf), "BMI260: %d %d 0x%02X", bmi.sensor_id, imu_ret, imu_who_am_i);
     UI_Logger_AddLine(&logWindow, buf);
-    snprintf(buf, sizeof(buf), "AK09916: 0x%02X", mag_who_am_i);
+    snprintf(buf, sizeof(buf), "BMP580: %d %d 0x%02X", bmp580.sensor_id, bmp580_ret, bmp_who_am_i);
     UI_Logger_AddLine(&logWindow, buf);
-    snprintf(buf, sizeof(buf), "BMP280: 0x%02X", bmp_who_am_i);
+    snprintf(buf, sizeof(buf), "MMC5983MA: %d %d 0x%02X", mmc.sensor_id, mmc_ret, mag_who_am_i);
     UI_Logger_AddLine(&logWindow, buf);
-    BMP280_Read(&init_altitude, &init_temperature);
 
     sm_vec3_t accel_bias = {0.0f, 0.0f, 0.0f};
     sm_vec3_t accel_scale = {1.0f, 1.0f, 1.0f};
@@ -126,7 +176,7 @@ int main() {
     Command_SetLandCallback(Control_Land);
     Command_SetHoverCallback(Control_Hover);
 
-    Window_To(WINDOW_BATTERY);
+    Window_To(WINDOW_IMU);
 
     // TaskHandle_t xExampleTaskHandle = NULL;
     // ( void ) xTaskCreate( exampleTask,
@@ -151,10 +201,42 @@ int main() {
         Key_Toggle_Handler();
         LED_Toggle_Handler();
 
-        ICM20948_Read(imu_rx_buf, mag_rx_buf);
-        BMP280_Read(&altitude_rx, &temperature_rx);
+        BMI260_ReadAccel(&bmi, &acc);
+        BMI260_ReadGyro(&bmi, &gyr);
+        memcpy(imu_rx_buf, &acc, 6);
+        memcpy(imu_rx_buf + 6, &gyr, 6);
+        /* ARM 小端 → imu_rx_buf 需要大端，逐对交换 */
+        for (int i = 0; i < 12; i += 2) {
+            uint8_t t = imu_rx_buf[i];
+            imu_rx_buf[i] = imu_rx_buf[i + 1];
+            imu_rx_buf[i + 1] = t;
+        }
+
+        BMP580_ReadData(&bmp580, &baro_data);
+        altitude_rx = BMP580_PressureToAltitudeWithTemp(
+            baro_data.pressure_pa,
+            baro_data.temperature_deg,
+            sea_level_p);
+        temperature_rx = baro_data.temperature_deg;
+
+        MMC5983MA_ReadMagOnly(&mmc, &mag_data);
+        memcpy(mag_rx_buf, &mag_data, 6);
+        /* ARM 小端 → mag_rx_buf 需要大端，逐对交换 */
+        for (int i = 0; i < 6; i += 2) {
+            uint8_t t = mag_rx_buf[i];
+            mag_rx_buf[i] = mag_rx_buf[i + 1];
+            mag_rx_buf[i + 1] = t;
+        }
 
         Battery_Measure_Step();
+
+        if (esRxStatusUart2 == ES_RX_STATE_COMPLETE) {
+            uint8_t extra_sensor_data[64] = {0};
+            uint16_t extra_sensor_len = ExtraSensor_ReadData(extra_sensor_data);
+            if (extra_sensor_len > 0) {
+                UI_Logger_AddLine(&logWindow, (char*)extra_sensor_data);
+            }
+        }
 
         /* 发送数据包 */
         {

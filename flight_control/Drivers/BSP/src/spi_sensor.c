@@ -30,6 +30,7 @@ uint8_t SPI_Sensor_Register(GPIO_TypeDef *cs_port, uint16_t cs_pin) {
         spi_sensors[spi_sensor_count].cs_port = cs_port;
         spi_sensors[spi_sensor_count].cs_pin = cs_pin;
         spi_sensor_count++;
+        SPI_Sensor_Off(spi_sensor_count);
         return spi_sensor_count;
     }
     return 0;
@@ -55,4 +56,44 @@ uint8_t SPI_Sensor_TransferByte(uint8_t tx) {
     SPI_I2S_SendData(SPI_SENSOR, tx);
     for (timeout = 0x5FFF; timeout > 0 && SPI_I2S_GetFlagStatus(SPI_SENSOR, SPI_I2S_FLAG_RXNE) == RESET; timeout--);
     return SPI_I2S_ReceiveData(SPI_SENSOR);
+}
+
+int SPI_Sensor_ReadBytes(uint8_t sensor_id, uint8_t reg, uint8_t* data, uint16_t len) {
+    if (sensor_id == 0 || sensor_id > spi_sensor_count)
+        return -1;
+    if (data == NULL || len == 0)
+        return -1;
+
+    SPI_Sensor_On(sensor_id);
+
+    /* 发送寄存器地址（最高位置 1 表示读） */
+    SPI_Sensor_TransferByte(reg | 0x80);
+
+    /* 连续读取 */
+    for (uint16_t i = 0; i < len; i++) {
+        data[i] = SPI_Sensor_TransferByte(0x00);
+    }
+
+    SPI_Sensor_Off(sensor_id);
+    return 0;
+}
+
+int SPI_Sensor_WriteBytes(uint8_t sensor_id, uint8_t reg, const uint8_t* data, uint16_t len) {
+    if (sensor_id == 0 || sensor_id > spi_sensor_count)
+        return -1;
+    if (data == NULL || len == 0)
+        return -1;
+
+    SPI_Sensor_On(sensor_id);
+
+    /* 发送寄存器地址（最高位 0 表示写） */
+    SPI_Sensor_TransferByte(reg & 0x7F);
+
+    /* 连续写入 */
+    for (uint16_t i = 0; i < len; i++) {
+        SPI_Sensor_TransferByte(data[i]);
+    }
+
+    SPI_Sensor_Off(sensor_id);
+    return 0;
 }

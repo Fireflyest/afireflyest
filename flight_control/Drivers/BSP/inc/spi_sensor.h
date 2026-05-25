@@ -35,4 +35,7 @@ void SPI_Sensor_Off(uint8_t sensor_id);
 
 uint8_t SPI_Sensor_TransferByte(uint8_t tx);
 
+int SPI_Sensor_ReadBytes(uint8_t sensor_id, uint8_t reg, uint8_t* data, uint16_t len);
+int SPI_Sensor_WriteBytes(uint8_t sensor_id, uint8_t reg, const uint8_t* data, uint16_t len);
+
 #endif /* __SPI_SENSOR_H */

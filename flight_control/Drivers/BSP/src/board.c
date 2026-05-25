@@ -42,7 +42,8 @@ void Battery_GPIO_Init(void) {
 
 void SPI_Sensor_GPIO_Init(void) {
     RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
-    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOD, ENABLE);
 
     GPIO_InitTypeDef GPIO_InitStructure;
     GPIO_InitStructure.GPIO_Pin = GPIO_Pin_13 | GPIO_Pin_14 | GPIO_Pin_15;
@@ -64,59 +65,59 @@ void SPI_Sensor_GPIO_Init(void) {
     GPIO_Init(GPIOB, &GPIO_InitStructure);
     GPIO_ResetBits(GPIOB, GPIO_Pin_12); // spi mode
 
-    #ifdef BMP280
-    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_5;
+#ifdef SENSOR_BARO
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_2;
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_OUT;
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
     GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
     GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
-    GPIO_Init(GPIOA, &GPIO_InitStructure);
-    GPIO_ResetBits(GPIOA, GPIO_Pin_5); // spi mode
-    #endif // #ifdef BMP280
+    GPIO_Init(GPIOC, &GPIO_InitStructure);
+    GPIO_ResetBits(GPIOC, GPIO_Pin_2); // spi mode
+#endif // #ifdef SENSOR_BARO
+
+#ifdef SENSOR_MAG
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_2;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_OUT;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
+    GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
+    GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
+    GPIO_Init(GPIOD, &GPIO_InitStructure);
+    GPIO_ResetBits(GPIOD, GPIO_Pin_2); // spi mode
+#endif // #ifdef SENSOR_MAG
 }
 
 void PWM_GPIO_Init(void) {
-    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
-    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
 
     GPIO_InitTypeDef GPIO_InitStructure;
-    /* Configure TIM3 pins: CH3 (PB0) and CH4 (PB1) */
-    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1;
+    /* Configure TIM3 pins: CH1 (PC6) CH2 (PC7) CH3 (PC8) CH4 (PC9) */
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_6 | GPIO_Pin_7 | GPIO_Pin_8 | GPIO_Pin_9;
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF;     // Alternate Function mode
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
     GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;   // Push-pull
     GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;     // Pull-up resistors
-    GPIO_Init(GPIOB, &GPIO_InitStructure);
-    /* Connect PB0 and PB1 to TIM3 */
-    GPIO_PinAFConfig(GPIOB, GPIO_PinSource0, GPIO_AF_TIM3);
-    GPIO_PinAFConfig(GPIOB, GPIO_PinSource1, GPIO_AF_TIM3);
-
-    /* Configure TIM3 pins: CH1 (PA6) and CH2 (PA7) */
-    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_6 | GPIO_Pin_7;
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF;     // Alternate Function mode
-    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
-    GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;   // Push-pull
-    GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;     // Pull-up resistors
-    GPIO_Init(GPIOA, &GPIO_InitStructure);
-    /* Connect PA6 and PA7 to TIM3 */
-    GPIO_PinAFConfig(GPIOA, GPIO_PinSource6, GPIO_AF_TIM3);
-    GPIO_PinAFConfig(GPIOA, GPIO_PinSource7, GPIO_AF_TIM3);
+    GPIO_Init(GPIOC, &GPIO_InitStructure);
+    /* Connect PC6 PC7 PC8 PC9 to TIM3 */
+    GPIO_PinAFConfig(GPIOC, GPIO_PinSource6, GPIO_AF_TIM3);
+    GPIO_PinAFConfig(GPIOC, GPIO_PinSource7, GPIO_AF_TIM3);
+    GPIO_PinAFConfig(GPIOC, GPIO_PinSource8, GPIO_AF_TIM3);
+    GPIO_PinAFConfig(GPIOC, GPIO_PinSource9, GPIO_AF_TIM3);
 }
 
 void UART1_GPIO_Init(void) {
-    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);  // For UART pins on GPIOB
-    
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);  // For UART pins on GPIOA
+
     GPIO_InitTypeDef GPIO_InitStructure;
-    /* Configure USART1 pins: TX (PB6) and RX (PB7) */
-    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_6 | GPIO_Pin_7;
+    /* Configure USART1 pins: TX (PA9) and RX (PA10) */
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_9 | GPIO_Pin_10;
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF;        // Alternate Function mode
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
     GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;      // Push-pull for UART
     GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;        // Pull-up resistors
-    GPIO_Init(GPIOB, &GPIO_InitStructure);
-    /* Connect PB6 and PB7 to USART1 */
-    GPIO_PinAFConfig(GPIOB, GPIO_PinSource6, GPIO_AF_USART1);
-    GPIO_PinAFConfig(GPIOB, GPIO_PinSource7, GPIO_AF_USART1);
+    GPIO_Init(GPIOA, &GPIO_InitStructure);
+    /* Connect PA9 and PA10 to USART1 */
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource9, GPIO_AF_USART1);
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource10, GPIO_AF_USART1);
 }
 
 void UART2_GPIO_Init(void) {
@@ -133,6 +134,22 @@ void UART2_GPIO_Init(void) {
     /* Connect PA2 and PA3 to USART2 */
     GPIO_PinAFConfig(GPIOA, GPIO_PinSource2, GPIO_AF_USART2);
     GPIO_PinAFConfig(GPIOA, GPIO_PinSource3, GPIO_AF_USART2);
+}
+
+void UART6_GPIO_Init(void) {
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);  // For UART pins on GPIOA
+
+    GPIO_InitTypeDef GPIO_InitStructure;
+    /* Configure USART6 pins: TX (PA11) and RX (PA12) */
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_11 | GPIO_Pin_12;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF;  // Alternate Function mode
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
+    GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;  // Push-pull for UART
+    GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;    // Pull-up resistors
+    GPIO_Init(GPIOA, &GPIO_InitStructure);
+    /* Connect PA11 and PA12 to USART6 */
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource11, GPIO_AF_USART6);
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource12, GPIO_AF_USART6);
 }
 
 void OLED_GPIO_Init(void) {

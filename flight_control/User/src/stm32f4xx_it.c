@@ -181,6 +181,23 @@ void USART1_IRQHandler(void) {
     }
 }
 
+void USART2_IRQHandler(void) {
+    if (USART_GetITStatus(USART2, USART_IT_IDLE) != RESET) {
+        // 清除 IDLE 标志
+        volatile uint32_t temp;
+        temp = USART2->SR;
+        temp = USART2->DR;
+
+        esRxStatusUart2 = ES_RX_STATE_COMPLETE;
+    }
+
+    if (USART_GetITStatus(USART2, USART_IT_RXNE) != RESET) {
+        LED_On();
+        if (esRxIndexUart2 < ES_RX_BUFFER_SIZE - 1) {
+            esRxBuffer[esRxIndexUart2++] = (uint8_t)USART_ReceiveData(USART2);
+        }
+    }
+}
 
 void DMA1_Stream6_IRQHandler(void) {
     if (DMA_GetITStatus(DMA1_Stream6, DMA_IT_TCIF6)) {

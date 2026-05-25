@@ -47,8 +47,13 @@ project:
         - file: ./Drivers/BSP/src/oled.c
         - file: ./Drivers/BSP/src/persistence.c
         - file: ./Drivers/BSP/src/spi_sensor.c
-        - file: ./Drivers/BSP/src/icm20948.c
-        - file: ./Drivers/BSP/src/bmp280.c
+        # - file: ./Drivers/BSP/src/icm20948.c
+        # - file: ./Drivers/BSP/src/bmi2.c
+        - file: ./Drivers/BSP/src/bmi260.c
+        # - file: ./Drivers/BSP/src/accel_gyro.c
+        # - file: ./Drivers/BSP/src/bmp280.c
+        - file: ./Drivers/BSP/src/bmp580.c
+        - file: ./Drivers/BSP/src/mmc5983ma.c
     - group: Middlewares Files
       files:
         - file: ./Middlewares/Algorithm/src/lowpass.c
@@ -58,6 +63,7 @@ project:
         # - file: ./Middlewares/Algorithm/src/ekf_state6.c
         - file: ./Middlewares/Modules/src/battery.c
         - file: ./Middlewares/Modules/src/ble.c
+        - file: ./Middlewares/Modules/src/extra_sensor.c
         - file: ./Middlewares/Modules/src/calibrate_accel.c
         - file: ./Middlewares/Modules/src/fps.c
         - file: ./Middlewares/Modules/src/key.c
