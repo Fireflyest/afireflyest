@@ -86,9 +86,6 @@ int main() {
     SPI_Sensor_Init();
 
     bmi260_raw_xyz_t acc, gyr;
-    // uint8_t imu_sensor_id = SPI_Sensor_Register(GPIO_IMU_SPI, GPIO_IMU_SPI_CS_PIN);
-    // int8_t imu_ret = BMI_Init(imu_sensor_id);
-
     bmi260_dev_t bmi;
     bmi.sensor_id = SPI_Sensor_Register(GPIO_IMU_SPI, GPIO_IMU_SPI_CS_PIN);
     BMI260_SetDelay(Delay_ms);

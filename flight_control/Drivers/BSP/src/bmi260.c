@@ -845,18 +845,6 @@ bmi260_err_t BMI260_Init(bmi260_dev_t* dev) {
     uint8_t chip_id = 0;
     uint8_t confirmed = 0;
 
-    /* === 第一次唤醒（APS 模式） === */
-    for (int i = 0; i < 50; i++) {
-        rslt = read_reg(dev->sensor_id, BMI2_CHIP_ID_ADDR, &chip_id);
-        if (rslt == BMI260_OK && chip_id == BMI260_CHIP_ID) {
-            confirmed = 1;
-            break;
-        }
-        delay_ms(10);
-    }
-    if (!confirmed)
-        return -2;
-
     /* === 软复位 === */
     rslt = write_reg(dev->sensor_id, BMI2_CMD_REG_ADDR, 0xB6);
     if (rslt != BMI260_OK)
@@ -903,20 +891,10 @@ bmi260_err_t BMI260_Init(bmi260_dev_t* dev) {
         return -11;
     delay_ms(100);
 
-    /* === 验证 DRDY === */
-    uint8_t status = 0;
-    rslt = read_reg(dev->sensor_id, 0x03, &status);
-    if (rslt != BMI260_OK)
-        return -14;
-    if (!(status & 0x80))
-        return -15;
-    if (!(status & 0x40))
-        return -16;
-
-    dev->acc_range = 0x01;
-    dev->gyr_range = 0x00;
-    dev->acc_lsb_per_g = 8192.0f;
-    dev->gyr_lsb_per_dps = 16.384f;
+    /* 写 ACC_RANGE = ±16g */
+    write_reg(dev->sensor_id, 0x41, 0x03);
+    /* 写 GYR_RANGE = ±2000dps */
+    write_reg(dev->sensor_id, 0x43, 0x00);
 
     return BMI260_OK;
 }
