@@ -764,36 +764,63 @@ static bmi260_err_t soft_reset(bmi260_dev_t* dev) {
     return rslt;
 }
 
-/* ═══════════════════════════════════════════════════
- *  上传配置文件（一次性写入，CS 不拉高）
- * ═══════════════════════════════════════════════════ */
+static bmi260_err_t write_regs(uint8_t sensor_id, uint8_t reg, const uint8_t* buf, uint8_t len) {
+    SPI_Sensor_On(sensor_id);
+    SPI_Sensor_TransferByte(reg);
+    for (uint8_t i = 0; i < len; i++) {
+        SPI_Sensor_TransferByte(buf[i]);
+    }
+    SPI_Sensor_Off(sensor_id);
+    return BMI260_OK;
+}
 
 static bmi260_err_t upload_config(bmi260_dev_t* dev) {
     bmi260_err_t rslt;
     uint8_t val;
+    uint16_t chunk_size = 16;
 
-    /* 1. 关闭 APS */
+    /* 关闭 APS */
     rslt = write_reg(dev->sensor_id, BMI2_PWR_CONF_ADDR, 0x00);
     if (rslt != BMI260_OK)
         return rslt;
     delay_ms(1);
 
-    /* 2. 准备接收配置 */
+    /* 禁用配置加载 */
     rslt = write_reg(dev->sensor_id, BMI2_INIT_CTRL_ADDR, 0x00);
     if (rslt != BMI260_OK)
         return rslt;
     delay_ms(1);
 
-    /* 3. 一次性写入整个配置文件（使用 SPI_Sensor_WriteBytes，CS 不拉高） */
-    SPI_Sensor_WriteBytes(dev->sensor_id, BMI2_INIT_DATA_ADDR,
-                          bmi260_config_file, (uint16_t)bmi260_config_size);
+    /* 逐块写入 */
+    for (uint32_t index = 0; index < bmi260_config_size; index += chunk_size) {
+        uint16_t word_addr = (uint16_t)(index / 2); /* 关键：地址 = index / 2 */
 
-    /* 4. 通知写入完成 */
+        /* 设置地址：低 4 位在第一个字节，高 8 位在第二个字节 */
+        rslt = write_reg(dev->sensor_id, BMI2_INIT_ADDR_0, (uint8_t)(word_addr & 0x0F));
+        if (rslt != BMI260_OK)
+            return rslt;
+        rslt = write_reg(dev->sensor_id, BMI2_INIT_ADDR_1, (uint8_t)(word_addr >> 4));
+        if (rslt != BMI260_OK)
+            return rslt;
+
+        uint16_t remain = bmi260_config_size - index;
+        uint16_t write_len = (remain < chunk_size) ? remain : chunk_size;
+
+        /* 写入数据 */
+        SPI_Sensor_On(dev->sensor_id);
+        SPI_Sensor_TransferByte(BMI2_INIT_DATA_ADDR & 0x7F);
+        for (uint16_t i = 0; i < write_len; i++) {
+            SPI_Sensor_TransferByte(bmi260_config_file[index + i]);
+        }
+        SPI_Sensor_Off(dev->sensor_id);
+    }
+
+    /* 启用配置加载 */
     rslt = write_reg(dev->sensor_id, BMI2_INIT_CTRL_ADDR, 0x01);
     if (rslt != BMI260_OK)
         return rslt;
 
-    /* 5. 等待 INIT_OK */
+    /* 等待 INIT_OK */
     for (int i = 0; i < 2000; i++) {
         rslt = read_reg(dev->sensor_id, BMI2_INTERNAL_STATUS_ADDR, &val);
         if (rslt != BMI260_OK)
@@ -818,9 +845,7 @@ bmi260_err_t BMI260_Init(bmi260_dev_t* dev) {
     uint8_t chip_id = 0;
     uint8_t confirmed = 0;
 
-    /* === bmi2_sec_init === */
-    dev->aps_status = 1;
-
+    /* === 第一次唤醒（APS 模式） === */
     for (int i = 0; i < 50; i++) {
         rslt = read_reg(dev->sensor_id, BMI2_CHIP_ID_ADDR, &chip_id);
         if (rslt == BMI260_OK && chip_id == BMI260_CHIP_ID) {
@@ -830,35 +855,66 @@ bmi260_err_t BMI260_Init(bmi260_dev_t* dev) {
         delay_ms(10);
     }
     if (!confirmed)
-        return BMI260_ERR_CHIP_ID;
+        return -2;
 
-    /* === bmi2_soft_reset === */
+    /* === 软复位 === */
     rslt = write_reg(dev->sensor_id, BMI2_CMD_REG_ADDR, 0xB6);
     if (rslt != BMI260_OK)
-        return rslt;
+        return -3;
     delay_ms(2);
 
     dev->aps_status = 1;
 
-    uint8_t dummy;
-    rslt = read_reg(dev->sensor_id, BMI2_CHIP_ID_ADDR, &dummy);
-    if (rslt != BMI260_OK)
-        return rslt;
+    /* === 第二次唤醒（复位后又回到 APS） === */
+    confirmed = 0;
+    for (int i = 0; i < 50; i++) {
+        rslt = read_reg(dev->sensor_id, BMI2_CHIP_ID_ADDR, &chip_id);
+        if (rslt == BMI260_OK && chip_id == BMI260_CHIP_ID) {
+            confirmed = 1;
+            break;
+        }
+        delay_ms(10);
+    }
+    if (!confirmed)
+        return -4;
 
-    /* === bmi2_write_config_file === */
+    /* === 上传配置文件 === */
     rslt = upload_config(dev);
     if (rslt != BMI260_OK)
-        return rslt;
+        return -5;
 
-    /* === 显式使能传感器 === */
+    /* === 关闭 APS === */
+    rslt = write_reg(dev->sensor_id, BMI2_PWR_CONF_ADDR, 0x00);
+    if (rslt != BMI260_OK)
+        return -6;
+    delay_ms(1);
+
+    /* === 配置 ACC === */
+    uint8_t acc_data[2] = {0x28, 0x01};
+    SPI_Sensor_WriteBytes(dev->sensor_id, BMI2_ACC_CONF_ADDR, acc_data, 2);
+
+    /* === 配置 GYR === */
+    uint8_t gyr_data[2] = {0x29, 0x00};
+    SPI_Sensor_WriteBytes(dev->sensor_id, BMI2_GYR_CONF_ADDR, gyr_data, 2);
+
+    /* === 使能传感器 === */
     rslt = write_reg(dev->sensor_id, BMI2_PWR_CTRL_ADDR, 0x0E);
     if (rslt != BMI260_OK)
-        return rslt;
+        return -11;
     delay_ms(100);
 
-    /* 保存默认量程 */
-    dev->acc_range = 0x01; /* ±4g */
-    dev->gyr_range = 0x00; /* ±2000dps */
+    /* === 验证 DRDY === */
+    uint8_t status = 0;
+    rslt = read_reg(dev->sensor_id, 0x03, &status);
+    if (rslt != BMI260_OK)
+        return -14;
+    if (!(status & 0x80))
+        return -15;
+    if (!(status & 0x40))
+        return -16;
+
+    dev->acc_range = 0x01;
+    dev->gyr_range = 0x00;
     dev->acc_lsb_per_g = 8192.0f;
     dev->gyr_lsb_per_dps = 16.384f;
 
