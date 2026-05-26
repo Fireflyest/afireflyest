@@ -3,56 +3,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "bmp5_defs.h"
 #include "spi_sensor.h"
-
-/* ═══════════════════════════════════════════════════
- *  寄存器地址
- * ═══════════════════════════════════════════════════ */
-
-#define BMP580_REG_CHIP_ID 0x01
-#define BMP580_REG_REV_ID 0x02
-#define BMP580_REG_STATUS 0x11
-#define BMP580_REG_DRIVE_CONFIG 0x13
-#define BMP580_REG_INT_CONFIG 0x14
-#define BMP580_REG_INT_SOURCE 0x15
-#define BMP580_REG_FIFO_CONFIG 0x16
-#define BMP580_REG_FIFO_COUNT 0x17
-#define BMP580_REG_FIFO_SEL 0x18
-#define BMP580_REG_TEMP_XLSB 0x1D
-#define BMP580_REG_TEMP_LSB 0x1E
-#define BMP580_REG_TEMP_MSB 0x1F
-#define BMP580_REG_PRESS_XLSB 0x20
-#define BMP580_REG_PRESS_LSB 0x21
-#define BMP580_REG_PRESS_MSB 0x22
-#define BMP580_REG_INT_STATUS 0x27
-#define BMP580_REG_STATUS2 0x28
-#define BMP580_REG_FIFO_DATA 0x29
-#define BMP580_REG_NVM_ADDR 0x2B
-#define BMP580_REG_NVM_DATA_LSB 0x2C
-#define BMP580_REG_NVM_DATA_MSB 0x2D
-#define BMP580_REG_DSP_CONFIG 0x30
-#define BMP580_REG_DSP_IIR 0x31
-#define BMP580_REG_OOR_THR_P_LSB 0x32
-#define BMP580_REG_OOR_THR_P_MSB 0x33
-#define BMP580_REG_OOR_RANGE 0x34
-#define BMP580_REG_OOR_CONFIG 0x35
-#define BMP580_REG_OSR_CONFIG 0x36
-#define BMP580_REG_ODR_CONFIG 0x37
-#define BMP580_REG_OSR_EFF 0x38
-#define BMP580_REG_CMD 0x7E
-
-/* ═══════════════════════════════════════════════════
- *  常量
- * ═══════════════════════════════════════════════════ */
-
-#define BMP580_CHIP_ID 0x50
-#define BMP580_CMD_SOFT_RESET 0xB6
-#define BMP580_CMD_NVM_TRIGGER 0x5D
-#define BMP580_CMD_NVM_PROG 0x0A
-#define BMP580_CMD_NVM_READ 0x5A
-#define BMP580_NVM_USER_ADDR_MIN 0x20
-#define BMP580_NVM_USER_ADDR_MAX 0x22
-#define BMP580_FIFO_EMPTY_BYTE 0x7F
 
 /* ═══════════════════════════════════════════════════
  *  枚举
@@ -60,9 +12,9 @@
 
 typedef enum {
     BMP580_MODE_STANDBY = 0x00,
-    BMP580_MODE_FORCED = 0x01,
-    BMP580_MODE_NORMAL = 0x03,
-    BMP580_MODE_CONTINUOUS = 0x07,
+    BMP580_MODE_NORMAL = 0x01,
+    BMP580_MODE_FORCED = 0x02,
+    BMP580_MODE_CONTINUOUS = 0x03,
 } bmp580_mode_t;
 
 typedef enum {
@@ -130,6 +82,8 @@ typedef enum {
     BMP580_ERR_NVM = -4,
     BMP580_ERR_TIMEOUT = -5,
     BMP580_ERR_FIFO_EMPTY = -6,
+    BMP580_ERR_POWER_UP = -7,
+    BMP580_ERR_POR = -8,
 } bmp580_err_t;
 
 /* ═══════════════════════════════════════════════════
@@ -145,6 +99,7 @@ typedef struct {
 
 typedef struct {
     uint8_t sensor_id;
+    uint8_t chip_id;
     bmp580_osr_t osr_p;
     bmp580_osr_t osr_t;
 } bmp580_dev_t;

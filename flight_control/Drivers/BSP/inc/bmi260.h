@@ -21,11 +21,15 @@ extern const uint32_t bmi260_config_size;
 
 typedef enum {
     BMI260_OK = 0,
-    BMI260_ERR_PARAM = -1,
-    BMI260_ERR_CHIP_ID = -2,
-    BMI260_ERR_COMM = -3,
-    BMI260_ERR_TIMEOUT = -4,
-    BMI260_ERR_INIT = -5,
+    BMI260_ERR_PARAM = -1,       /* 参数无效（NULL指针） */
+    BMI260_ERR_CHIP_ID = -2,     /* Chip ID 校验失败 */
+    BMI260_ERR_RESET = -3,       /* 软复位写入失败 */
+    BMI260_ERR_WAKEUP = -4,      /* 复位后唤醒超时 */
+    BMI260_ERR_CONFIG = -5,      /* 上传配置文件失败 */
+    BMI260_ERR_APS_DISABLE = -6, /* 关闭 APS 模式失败 */
+    BMI260_ERR_ENABLE = -7,      /* 使能传感器失败 */
+    BMI260_ERR_ACC_RANGE = -8,   /* 设置 ACC 量程失败 */
+    BMI260_ERR_GYR_RANGE = -9,   /* 设置 GYR 量程失败 */
 } bmi260_err_t;
 
 /* ═══════════════════════════════════════════════════

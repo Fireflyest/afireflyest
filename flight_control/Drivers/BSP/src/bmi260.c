@@ -830,7 +830,7 @@ static bmi260_err_t upload_config(bmi260_dev_t* dev) {
         delay_ms(1);
     }
 
-    return BMI260_ERR_INIT;
+    return BMI260_ERR_CONFIG;
 }
 
 /* ═══════════════════════════════════════════════════
@@ -848,7 +848,7 @@ bmi260_err_t BMI260_Init(bmi260_dev_t* dev) {
     /* === 软复位 === */
     rslt = write_reg(dev->sensor_id, BMI2_CMD_REG_ADDR, 0xB6);
     if (rslt != BMI260_OK)
-        return -3;
+        return BMI260_ERR_RESET;
     delay_ms(2);
 
     dev->aps_status = 1;
@@ -864,17 +864,17 @@ bmi260_err_t BMI260_Init(bmi260_dev_t* dev) {
         delay_ms(10);
     }
     if (!confirmed)
-        return -4;
+        return BMI260_ERR_WAKEUP;
 
     /* === 上传配置文件 === */
     rslt = upload_config(dev);
     if (rslt != BMI260_OK)
-        return -5;
+        return BMI260_ERR_CONFIG;
 
     /* === 关闭 APS === */
     rslt = write_reg(dev->sensor_id, BMI2_PWR_CONF_ADDR, 0x00);
     if (rslt != BMI260_OK)
-        return -6;
+        return BMI260_ERR_APS_DISABLE;
     delay_ms(1);
 
     /* === 配置 ACC === */
@@ -888,13 +888,18 @@ bmi260_err_t BMI260_Init(bmi260_dev_t* dev) {
     /* === 使能传感器 === */
     rslt = write_reg(dev->sensor_id, BMI2_PWR_CTRL_ADDR, 0x0E);
     if (rslt != BMI260_OK)
-        return -11;
+        return BMI260_ERR_ENABLE;
     delay_ms(100);
 
     /* 写 ACC_RANGE = ±16g */
-    write_reg(dev->sensor_id, 0x41, 0x03);
+    rslt = write_reg(dev->sensor_id, 0x41, 0x03);
+    if (rslt != BMI260_OK)
+        return BMI260_ERR_ACC_RANGE;
+
     /* 写 GYR_RANGE = ±2000dps */
-    write_reg(dev->sensor_id, 0x43, 0x00);
+    rslt = write_reg(dev->sensor_id, 0x43, 0x00);
+    if (rslt != BMI260_OK)
+        return BMI260_ERR_GYR_RANGE;
 
     return BMI260_OK;
 }
