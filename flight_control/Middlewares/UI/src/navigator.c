@@ -90,7 +90,7 @@ void UI_IMU_Draw(UI_Widget* widget) {
     sm_vec3_t accel, gyro, mag;
     Attitude_GetAccel(accel);
     Attitude_GetGyro(gyro);
-    // Attitude_GetMag(mag);
+    Attitude_GetMag(mag);
 
     int16_t tempRaw = (int16_t)((imu_rx_buf[12] << 8) | imu_rx_buf[13]);
     float tempC = (float)tempRaw / 333.87f + 21.0f;
@@ -103,9 +103,12 @@ void UI_IMU_Draw(UI_Widget* widget) {
 
     snprintf(line, sizeof(line), "AZ %6d GZ %6d", (int)(accel[2] * 10), (int)(gyro[2] * 10));
     GFX_DrawString(x, y + 2 * lh, line, GFX_COLOR_WHITE);
-    
-    // snprintf(line, sizeof(line), "MX %6d MY %6d", (int)mag[0], (int)mag[1]);
-    // GFX_DrawString(x, y + 3 * lh, line, GFX_COLOR_WHITE);
+
+    snprintf(line, sizeof(line), "MX %6d MY %6d", (int)(mag[0] * 1000), (int)(mag[1] * 1000));
+    GFX_DrawString(x, y + 3 * lh, line, GFX_COLOR_WHITE);
+
+    snprintf(line, sizeof(line), "MZ %6d", (int)(mag[2] * 1000));
+    GFX_DrawString(x, y + 4 * lh, line, GFX_COLOR_WHITE);
 
     // {
     //     float at = tempC < 0.0f ? -tempC : tempC;

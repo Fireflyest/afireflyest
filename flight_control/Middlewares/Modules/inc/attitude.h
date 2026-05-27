@@ -28,7 +28,7 @@ void Attitude_GetEuler(float *yaw, float *pitch, float *roll);
 void Attitude_GetQuat(sm_quat_t q);
 void Attitude_GetGyro(sm_vec3_t gyro);
 void Attitude_GetAccel(sm_vec3_t accel);
-// void Attitude_GetMag(sm_vec3_t mag);
+void Attitude_GetMag(sm_vec3_t mag);
 void Attitude_GetAltitude(float *altitude);
 void Attitude_GetVelocityZ(float *velocityZ);
 

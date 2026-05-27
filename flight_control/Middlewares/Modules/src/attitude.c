@@ -54,9 +54,9 @@ void Attitude_Update(float dt) {
     gyro_current[1] = ((int16_t)((imu_rx_buf[8] << 8) | imu_rx_buf[9])) / 16.4f * deg2rad;   // Y 轴 (GY / Pitch)：保持水平，机头向上抬（抬头）。右手大拇指指右侧，四指从下往上翻（也就是抬头）。预期：瞬间读数为 正(+)
     gyro_current[2] = ((int16_t)((imu_rx_buf[10] << 8) | imu_rx_buf[11])) / 16.4f * deg2rad;  // Z 轴 (GZ / Yaw)：保持水平，机头向右转（俯视看是顺时针转）。右手大拇指指向地面的 Z 轴，四指顺时针转。预期：瞬间读数为 正(+)
 
-    mag_current[0] = (int16_t)((mag_rx_buf[1] << 8) | mag_rx_buf[0]) * 0.15f;  // 0.15 μT/LSB
-    mag_current[1] = (int16_t)((mag_rx_buf[3] << 8) | mag_rx_buf[2]) * 0.15f; // 0.15 μT/LSB
-    mag_current[2] = (int16_t)((mag_rx_buf[5] << 8) | mag_rx_buf[4]) * 0.15f; // 0.15 μT/LSB
+    mag_current[0] = (int16_t)((mag_rx_buf[1] << 8) | mag_rx_buf[0]) / 4096.0f;
+    mag_current[1] = (int16_t)((mag_rx_buf[3] << 8) | mag_rx_buf[2]) / 4096.0f;
+    mag_current[2] = (int16_t)((mag_rx_buf[5] << 8) | mag_rx_buf[4]) / 4096.0f;
 
     if (calib_handle.state == CALIB_ACCEL_COLLECTING && diff_angle_filter.output < still_threshold) {
         Calib_Accel_AddSample(&calib_handle, accel_current, accel_clib_face);
@@ -123,7 +123,9 @@ void Attitude_GetAccel(sm_vec3_t accel) {
     accel[2] = accel_current[2] * g;
 }
 
-// void Attitude_GetMag(sm_vec3_t mag);
+void Attitude_GetMag(sm_vec3_t mag) {
+    memcpy(mag, mag_current, sizeof(sm_vec3_t));
+}
 
 void Attitude_GetAltitude(float *altitude) {
     #ifdef ATTITUDE_EKF_BARO

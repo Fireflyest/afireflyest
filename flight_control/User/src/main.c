@@ -85,8 +85,8 @@ int main() {
     SPI_Sensor_GPIO_Init();
     SPI_Sensor_Init();
 
-    bmi260_raw_xyz_t acc, gyr;
     bmi260_dev_t bmi;
+    bmi260_raw_xyz_t acc, gyr;
     bmi.sensor_id = SPI_Sensor_Register(GPIO_IMU_SPI, GPIO_IMU_SPI_CS_PIN);
     BMI260_SetDelay(Delay_ms);
     int8_t imu_ret = BMI260_Init(&bmi);
@@ -98,20 +98,11 @@ int main() {
     int8_t bmp580_ret = BMP580_Init(&bmp580);
 
     mmc5983ma_dev_t mmc;
-    mmc5983ma_data_t mag_data;
+    mmc5983ma_raw_data_t mag_data;
     mmc.sensor_id = SPI_Sensor_Register(GPIO_MAG_SPI, GPIO_MAG_SPI_CS_PIN);
     MMC5983MA_SetDelay(Delay_ms);
     int8_t mmc_ret = MMC5983MA_Init(&mmc);
 
-    BMP580_ConfigMeasurement(&bmp580,
-                             BMP580_OSR_16X, /* 压力 16x 过采样 */
-                             BMP580_OSR_1X,  /* 温度 1x */
-                             BMP580_ODR_32HZ,
-                             1); /* 使能压力 */
-    BMP580_ConfigIIR(&bmp580,
-                     BMP580_IIR_COEFF_3, /* 压力 IIR coeff=3 */
-                     BMP580_IIR_BYPASS,  /* 温度不滤波 */
-                     1);
     BMP580_ForcedMeasure(&bmp580, &baro_data);
     float sea_level_p = BMP580_AltitudeToSeaLevelPressure(
         baro_data.pressure_pa,
@@ -125,9 +116,9 @@ int main() {
     init_temperature = baro_data.temperature_deg;
     BMP580_SetPowerMode(&bmp580, BMP580_MODE_NORMAL);
 
-    MMC5983MA_SetBandwidth(&mmc, MMC_BW_00); /* 8ms, 最低噪声 0.4mG */
-    MMC5983MA_EnableAutoSR(&mmc, 1);
-    MMC5983MA_EnableContinuousMode(&mmc, MMC_CM_FREQ_100HZ, MMC_PRD_SET_100);
+    // MMC5983MA_SetBandwidth(&mmc, MMC_BW_00); /* 8ms, 最低噪声 0.4mG */
+    // MMC5983MA_EnableAutoSR(&mmc, 1);
+    // MMC5983MA_EnableContinuousMode(&mmc, MMC_CM_FREQ_100HZ, MMC_PRD_SET_100);
 
     Delay_ms(50);
     // Init_DMA_For_IMU_SPI2_TIM2(imu_tx_buf, imu_rx_buf);
@@ -145,6 +136,55 @@ int main() {
     UI_Logger_AddLine(&logWindow, buf);
     snprintf(buf, sizeof(buf), "MMC5983MA: %d %d 0x%02X", mmc.sensor_id, mmc_ret, mag_who_am_i);
     UI_Logger_AddLine(&logWindow, buf);
+
+
+
+
+
+    // uint8_t raw[7];
+    // SPI_Sensor_ReadBytes(mmc.sensor_id, 0x00, raw, 7);
+
+    // char text[32];
+    // snprintf(text, sizeof(text), "%02X %02X %02X %02X %02X %02X %02X",
+    //          raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6]);
+    // UI_Logger_AddLine(&logWindow, text);
+
+    // /* 直接读 mag_data，打印 uint32_t */
+    // MMC5983MA_ReadMagRaw(&mmc, &mag_data);
+
+    // snprintf(text, sizeof(text), "x:%lu", (unsigned long)mag_data.x);
+    // UI_Logger_AddLine(&logWindow, text);
+    // snprintf(text, sizeof(text), "y:%lu", (unsigned long)mag_data.y);
+    // UI_Logger_AddLine(&logWindow, text);
+    // snprintf(text, sizeof(text), "z:%lu", (unsigned long)mag_data.z);
+    // UI_Logger_AddLine(&logWindow, text);
+
+    // {
+    //     uint8_t raw7[7] = {0};
+
+    //     /* 手动 SET → TM_M → 读取，和驱动一样 */
+    //     uint8_t cmd;
+    //     cmd = 0x08; /* SET */
+    //     SPI_Sensor_WriteBytes(mmc.sensor_id, 0x09, &cmd, 1);
+    //     Delay_ms(2);
+    //     cmd = 0x01; /* TM_M */
+    //     SPI_Sensor_WriteBytes(mmc.sensor_id, 0x09, &cmd, 1);
+    //     Delay_ms(15);
+
+    //     SPI_Sensor_ReadBytes(mmc.sensor_id, 0x00, raw7, 7);
+
+    //     char text[40];
+    //     snprintf(text, sizeof(text), "%02X %02X %02X %02X %02X %02X %02X",
+    //              raw7[0], raw7[1], raw7[2], raw7[3], raw7[4], raw7[5], raw7[6]);
+    //     UI_Logger_AddLine(&logWindow, text);
+    // }
+
+    // sm_vec3_t mag;
+    // Attitude_GetMag(mag);
+
+    // char text[32];
+    // snprintf(text, sizeof(text), "mag z:%d", (int)(mag[2] * 1000));
+    // UI_Logger_AddLine(&logWindow, text);
 
     sm_vec3_t accel_bias = {0.0f, 0.0f, 0.0f};
     sm_vec3_t accel_scale = {1.0f, 1.0f, 1.0f};
@@ -216,15 +256,24 @@ int main() {
             sea_level_p);
         temperature_rx = baro_data.temperature_deg;
 
-        MMC5983MA_ReadMagOnly(&mmc, &mag_data);
-        memcpy(mag_rx_buf, &mag_data, 6);
-        /* ARM 小端 → mag_rx_buf 需要大端，逐对交换 */
-        for (int i = 0; i < 6; i += 2) {
-            uint8_t t = mag_rx_buf[i];
-            mag_rx_buf[i] = mag_rx_buf[i + 1];
-            mag_rx_buf[i + 1] = t;
+        MMC5983MA_ReadMagRaw(&mmc, &mag_data);
+
+        {
+            int16_t x = (int16_t)(mag_data.x - MMC_NULL_FIELD_16BIT);
+            int16_t y = (int16_t)(mag_data.y - MMC_NULL_FIELD_16BIT);
+            int16_t z = (int16_t)(mag_data.z - MMC_NULL_FIELD_16BIT);
+
+            mag_rx_buf[0] = (uint8_t)(x & 0xFF);
+            mag_rx_buf[1] = (uint8_t)((x >> 8) & 0xFF);
+            mag_rx_buf[2] = (uint8_t)(y & 0xFF);
+            mag_rx_buf[3] = (uint8_t)((y >> 8) & 0xFF);
+            mag_rx_buf[4] = (uint8_t)(z & 0xFF);
+            mag_rx_buf[5] = (uint8_t)((z >> 8) & 0xFF);
         }
 
+
+
+    
         Battery_Measure_Step();
 
         if (esRxStatusUart2 == ES_RX_STATE_COMPLETE) {
