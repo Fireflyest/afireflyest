@@ -36,9 +36,8 @@
  *  │             │  静止时理想输出: [0, 0, 0] (实际含 bias drift)             │
  *  ├─────────────┼────────────────────────────────────────────────────────────┤
  *  │  磁力计      │  机体系 FRD 地磁向量，单位 μT                             │
- *  │             │  水平朝北时: [m_N, m_E, m_D] (受当地磁偏角/磁倾角影响)     │
+ *  │             │  水平朝北时: [m_N, m_E, m_D] (取决于当地地磁场)            │
  *  │             │  水平朝东时: [m_E, -m_N, m_D]                            │
- *  │             │  其中 m_N, m_E, m_D 为当地 NED 系地磁参考分量              │
  *  │             │  初始化时需采集当地地磁参考，补偿磁偏角 (declination)        │
  *  ├─────────────┼────────────────────────────────────────────────────────────┤
  *  │  气压计      │  相对高度 h，单位 m，向上为正                              │
@@ -176,18 +175,20 @@ typedef struct {
  *
  * 各状态下的机体系输出 [a_x, a_y, a_z]:
  *
- *   ┌──────────────────────┬──────────────────────┐
- *   │  状态                 │  输出 (m/s²)          │
- *   ├──────────────────────┼──────────────────────┤
- *   │  水平静止             │  [0, 0, -9.81]       │
- *   │  右倾 90° 静止        │  [0, -9.81, 0]       │
- *   │  左倾 90° 静止        │  [0, +9.81, 0]       │
- *   │  倒扣静止             │  [0, 0, +9.81]       │
- *   │  机头朝上 90° 静止    │  [+9.81, 0, 0]       │
- *   │  机头朝下 90° 静止    │  [-9.81, 0, 0]       │
- *   │  自由落体             │  [0, 0, 0]           │
- *   │  北向加速 1m/s²       │  [+1, 0, -9.81]      │
- *   └──────────────────────┴──────────────────────┘
+ *   ┌──────────────────────┬──────────────────────────────────────────┐
+ *   │  状态                 │  输出 (m/s²)                             │
+ *   ├──────────────────────┼──────────────────────────────────────────┤
+ *   │  水平静止             │  [0, 0, -g]        Roll=0,   Pitch=0   │
+ *   │  右倾 90° 静止        │  [0, -g, 0]        Roll=+90°           │
+ *   │  左倾 90° 静止        │  [0, +g, 0]        Roll=-90°           │
+ *   │  机头朝天 (竖立)      │  [-g, 0, 0]        Pitch=-90° (抬头)  │
+ *   │  机头朝地 (俯冲)      │  [+g, 0, 0]        Pitch=+90° (低头)  │
+ *   │  倒扣 (翻转)          │  [0, 0, +g]        Roll=180°           │
+ *   │  自由落体             │  [0, 0, 0]         失重                 │
+ *   │  北向加速 1m/s²       │  [+1, 0, -g]       水平加速度叠加       │
+ *   └──────────────────────┴──────────────────────────────────────────┘
+ *
+ *   推导: f_body = R(q) · f_world, 其中 f_world = [0, 0, -g] (NED 系比力)
  *
  *   验证 (机头朝上 90°, θ=+90°):
  *     R_y(+90°) = [[0, 0, -1],[0, 1, 0],[1, 0, 0]]
@@ -213,17 +214,15 @@ typedef struct {
  * 多数 IMU 芯片同时输出角速度和加速度，时间戳相同。
  * 使用此结构可保证两个测量在 EKF predict 步骤中同步使用。
  *
- * 注意: header 仅一份，陀螺仪和加速度计共享同一时间戳。
- *       子结构不含独立 header，避免时间戳冗余。
+ * 使用说明:
+ *   ekf_predict() 读取 header.timestamp_us 判断时间步长。
+ *   gyro 和 accel 内部的 header 字段为预留，当前不参与逻辑，
+ *   调用方可选择不填充以简化赋值。
  */
 typedef struct {
     ekf_sensor_header_t header; /**< 公共头部 (陀螺仪+加速度计共用) */
-    float omega_x;              /**< X 轴角速度 (rad/s), roll rate  */
-    float omega_y;              /**< Y 轴角速度 (rad/s), pitch rate */
-    float omega_z;              /**< Z 轴角速度 (rad/s), yaw rate   */
-    float a_x;                  /**< X 轴加速度 (m/s²), 机头前方    */
-    float a_y;                  /**< Y 轴加速度 (m/s²), 右侧        */
-    float a_z;                  /**< Z 轴加速度 (m/s²), 机腹下方    */
+    ekf_gyro_t gyro;            /**< 陀螺仪数据                  */
+    ekf_accel_t accel;          /**< 加速度计数据                 */
 } ekf_imu_t;
 
 /* ========================================================================== */
@@ -235,17 +234,21 @@ typedef struct {
  *
  * 测量机体系 FRD 下的地磁向量。
  *
- * 各朝向下机体系输出:
+ * 各朝向下机体系输出 (m_body = R · m_earth):
+ *
  *   ┌──────────────────────┬───────────────────────────────┐
  *   │  状态                 │  输出 [m_x, m_y, m_z] (μT)    │
  *   ├──────────────────────┼───────────────────────────────┤
- *   │  水平朝北             │  [m_N, m_E, m_D] (取决于当地)  │
- *   │  水平朝东             │  [m_E, -m_N, m_D]             │
- *   │  水平朝南             │  [-m_N, -m_E, m_D]            │
- *   │  水平朝西             │  [-m_E, m_N, m_D]             │
+ *   │  水平朝北             │  [ m_N,  m_E,  m_D]           │
+ *   │  水平朝东             │  [ m_E, -m_N,  m_D]           │
+ *   │  水平朝南             │  [-m_N, -m_E,  m_D]           │
+ *   │  水平朝西             │  [-m_E,  m_N,  m_D]           │
+ *   │  右倾 90°             │  [ m_D,  m_E, -m_N]           │
+ *   │  机头朝天 (竖立)      │  [ m_D, -m_E,  m_N]           │
  *   └──────────────────────┴───────────────────────────────┘
  *
- *   其中 m_N, m_E, m_D 为当地 NED 系下的地磁参考分量。
+ *   其中 [m_N, m_E, m_D] 为当地 NED 系下的地磁参考分量。
+ *   注意: m_D (垂直分量) 在中国地区约 25~45 μT，不可忽略。
  *
  * 初始化要求:
  *   1. 在已知方位 (如水平朝北) 下采集磁力计数据
@@ -254,8 +257,8 @@ typedef struct {
  *   4. 存储参考向量 m_earth = [m_N, m_E, m_D] 供 EKF 观测模型使用
  *
  * 观测模型:
- *   m_measured = R * m_earth + bias + noise
- *   其中 R 为 earth→body 旋转矩阵
+ *   m_measured = R(q) * m_earth + bias + noise
+ *   其中 R(q) 为当前姿态对应的旋转矩阵 (世界系 → 机体系)
  */
 typedef struct {
     ekf_sensor_header_t header; /**< 公共头部: 时间戳 + 有效性   */
@@ -304,6 +307,10 @@ typedef struct {
  *   hdop:     水平精度因子，越小越好
  *
  * 采样率: 通常 1-10 Hz
+ *
+ * 注意: latitude 和 longitude 使用 double 类型以保证经纬度精度。
+ *       在 STM32 上 double 为 64 位，要求 8 字节对齐。
+ *       请勿对本结构体使用 #pragma pack(1)。
  */
 typedef struct {
     ekf_sensor_header_t header; /**< 公共头部: 时间戳 + 有效性    */
@@ -327,27 +334,24 @@ typedef struct {
  * 测量机体系水平面上的积分角位移 (非速度)。
  *
  * 输出约定:
- *   integrated_x: 沿 X_b (机头前方) 积分角位移 (rad)
- *   integrated_y: 沿 Y_b (机翼右侧) 积分角位移 (rad)
+ *   velocity_x: 沿 X_b (机头前方) 的地面投影速度 (m/s)，前方运动为正
+ *   velocity_y: 沿 Y_b (机翼右侧) 的地面投影速度 (m/s)，右方运动为正
  *
- * 转换为线速度:
- *   积分期间线位移 ≈ 积分角位移 × 距地高度 (h_agl)
- *   瞬时线速度 ≈ 角速度 × h_agl
- *
- * 高度依赖性:
- *   光流原始输出为角速度 (rad/s)，需乘以距地高度转换为线速度:
- *   v_linear = ω_optflow * h_agl (above ground level)
+ * 计算方法:
+ *   光流原始输出为角速度 ω (rad/s)，调用方需自行转换为线速度:
+ *   velocity = ω_optflow × h_agl (距地高度, above ground level)
+ *   然后填入 velocity_x / velocity_y。
  *
  * 局限:
  *   - 仅在纹理丰富的地面有效
- *   - 高速旋转时受旋转分量污染，需陀螺仪补偿
+ *   - 高速旋转时受旋转分量污染，需陀螺仪补偿 (integrated_xgyro/ygyro)
  *   - 高度过大时信噪比下降
  *   - 采样率: 通常 20-100 Hz
  */
 typedef struct {
     ekf_sensor_header_t header; /**< 公共头部: 时间戳 + 有效性    */
-    float integrated_x;         /**< X 方向积分角位移 (rad)       */
-    float integrated_y;         /**< Y 方向积分角位移 (rad)       */
+    float velocity_x;           /**< X 方向地面投影速度 (m/s)     */
+    float velocity_y;           /**< Y 方向地面投影速度 (m/s)     */
     float integrated_xgyro;     /**< 积分期间陀螺仪 X 角位移 (rad) */
     float integrated_ygyro;     /**< 积分期间陀螺仪 Y 角位移 (rad) */
     float distance_m;           /**< 距地高度 (m), 无效时为 -1    */
@@ -384,7 +388,7 @@ typedef struct {
  *   baro_bias_noise     1e-2 ~ 1e-1     m/√s       (random walk)
  *   gps_pos_noise       0.5 ~ 5.0       m (1σ)
  *   gps_vel_noise       0.1 ~ 1.0       m/s (1σ)
- *   optflow_noise       0.01 ~ 0.1      rad/s/√Hz
+ *   optflow_noise       0.01 ~ 0.1      (m/s)/√Hz
  */
 typedef struct {
     /* 陀螺仪噪声 */
@@ -407,7 +411,7 @@ typedef struct {
     float gps_vel_noise; /**< GPS 速度测量噪声 (m/s, 1σ)        */
 
     /* 光流噪声 */
-    float optflow_noise; /**< 光流白噪声密度 (rad/s/√Hz)        */
+    float optflow_noise; /**< 光流速度白噪声密度 (m/s/√Hz)      */
 } ekf_noise_params_t;
 
 /**
@@ -429,6 +433,9 @@ void ekf_noise_params_init_default(ekf_noise_params_t* params);
  *
  * 第一次收到有效 GPS 数据时，将当前位置设为原点 (lat0, lon0, alt0)。
  * 后续 GPS 数据均相对于此原点转换为 NED 局部坐标。
+ *
+ * 注意: lat0 和 lon0 使用 double 类型。
+ *       请勿对本结构体使用 #pragma pack(1) (8 字节对齐要求)。
  */
 typedef struct {
     double lat0;         /**< 原点纬度 (°)    */
@@ -508,9 +515,7 @@ typedef enum {
 /**
  * @brief 观测向量索引 — GPS 位置观测
  *
- * 全部使用 NED 坐标:
  * z = [p_N, p_E, p_D], h(x) = [x[PN], x[PE], x[PD]]
- * 若需向上高度: h_GPS = -p_D = -x[PD]
  */
 typedef enum {
     EKF_OBS_GPS_N = 0,

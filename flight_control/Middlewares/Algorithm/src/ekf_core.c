@@ -246,20 +246,28 @@ void ekf_quat_mult(const ekf_quat_t* a, const ekf_quat_t* b, ekf_quat_t* out) {
 
 void ekf_quat_to_rotmat(const ekf_quat_t* q, ekf_mat3_t* R) {
     float w = q->w, x = q->x, y = q->y, z = q->z;
-    float w2 = 2 * w, x2 = 2 * x, y2 = 2 * y;
-    float ww = w2 * w, xx = x2 * x, yy = y2 * y, zz = 2 * z * z;
-    float xy = x2 * y, xz = x2 * z, yz = y2 * z;
-    float wx = w2 * x, wy = w2 * y, wz = w2 * z;
 
-    R->m[0][0] = 1 - yy - zz;
-    R->m[0][1] = xy - wz;
-    R->m[0][2] = xz + wy;
-    R->m[1][0] = xy + wz;
-    R->m[1][1] = 1 - xx - zz;
-    R->m[1][2] = yz - wx;
-    R->m[2][0] = xz - wy;
-    R->m[2][1] = yz + wx;
-    R->m[2][2] = 1 - xx - yy;
+    /* 标准 Hamilton 公式产出 R_b2w (body→world) */
+    float r00 = 1.0f - 2.0f * (y * y + z * z);
+    float r01 = 2.0f * (x * y - w * z);
+    float r02 = 2.0f * (x * z + w * y);
+    float r10 = 2.0f * (x * y + w * z);
+    float r11 = 1.0f - 2.0f * (x * x + z * z);
+    float r12 = 2.0f * (y * z - w * x);
+    float r20 = 2.0f * (x * z - w * y);
+    float r21 = 2.0f * (y * z + w * x);
+    float r22 = 1.0f - 2.0f * (x * x + y * y);
+
+    /* 转置输出: R_w2b (world→body), 满足 v_body = R · v_world */
+    R->m[0][0] = r00;
+    R->m[0][1] = r10;
+    R->m[0][2] = r20;
+    R->m[1][0] = r01;
+    R->m[1][1] = r11;
+    R->m[1][2] = r21;
+    R->m[2][0] = r02;
+    R->m[2][1] = r12;
+    R->m[2][2] = r22;
 }
 
 void ekf_quat_to_euler(const ekf_quat_t* q, ekf_euler_t* euler) {
@@ -450,8 +458,8 @@ int ekf_align(ekf_t* ekf,
      *   pitch = atan2(ax, sqrt(ay²+az²))
      * (FRD 约定, 静止时 [ax,ay,az] ≈ [0,0,-g])
      */
-    float roll = atan2f(ay, -az);
-    float pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
+    float roll = atan2f(-ay, -az);                       // 右倾时 ay<0 → -ay>0 → +φ
+    float pitch = atan2f(ax, sqrtf(ay * ay + az * az));  // 抬头时 ax>0 → +θ
     float yaw = 0.0f;
 
     /* ---- Step 3: 由磁力计估计 yaw ---- */
@@ -1029,7 +1037,6 @@ void ekf_update_mag(ekf_t* ekf, const ekf_mag_t* mag) {
     if (mag->header.status != EKF_SENSOR_VALID)
         return;
 
-    /* 预测量测: h = R · m_earth */
     float R[3][3], RT[3][3];
     ekf_get_rotmat(ekf, R, RT);
 
@@ -1038,33 +1045,31 @@ void ekf_update_mag(ekf_t* ekf, const ekf_mag_t* mag) {
         ekf->mag_ref.m_earth.y,
         ekf->mag_ref.m_earth.z};
 
+    /* 预测量测: h = R_w2b · m_earth (世界系磁场转到机体系) */
     float h[3];
-    /* h = R · m_earth, 但 R 是 world→body, 而 m_earth 在 world 系
-     * h = R · m_earth (将世界系磁场转到机体系, 与量测比较)
-     */
     m3_mul_v(R, m_earth, h);
 
-    /* 量测: z = [m_x, m_y, m_z] (机体系) */
     float z[3] = {mag->m_x, mag->m_y, mag->m_z};
 
     /* 雅可比 H (3×15):
-     *   ∂h/∂δθ = -R · [m_earth]×
-     *   其余块为零
+     *   ∂h/∂δθ = +[R · m_earth]×
+     *
+     * 推导: h = R_true · m_earth, R_true = (I - [δθ]×)·R
+     *   δh = -[δθ]×·(R·m_earth) = +(R·m_earth)×δθ
+     *   ∂h/∂δθ = +[R·m_earth]×
      */
     float H_mag[MAX_MDIM][ESDIM];
     memset(H_mag, 0, sizeof(H_mag));
 
-    float skew_m[3][3], R_skew_m[3][3], neg_R_skew_m[3][3];
-    m3_skew(m_earth, skew_m);
-    m3_mul(R, skew_m, R_skew_m);
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++)
-            neg_R_skew_m[i][j] = -R_skew_m[i][j];
+    /* 计算 [R · m_earth]× */
+    float Rm[3];
+    m3_mul_v(R, m_earth, Rm);
+    float skew_Rm[3][3];
+    m3_skew(Rm, skew_Rm);
 
-    /* H[0:3, 6:9] = -R · [m_earth]× */
-    block_set(&H_mag[0][0], 0, 6, ESDIM, &neg_R_skew_m[0][0], 3, 3, 3);
+    /* H[0:3, 6:9] = +[R · m_earth]× */
+    block_set(&H_mag[0][0], 0, 6, ESDIM, &skew_Rm[0][0], 3, 3, 3);
 
-    /* 噪声协方差 R_noise */
     float sigma2 = ekf->noise.mag_noise * ekf->noise.mag_noise;
     float R_noise[MAX_MDIM][MAX_MDIM] = {
         {sigma2, 0, 0},
@@ -1177,17 +1182,16 @@ void ekf_update_optflow(ekf_t* ekf, const ekf_optflow_t* flow) {
     if (flow->header.status != EKF_SENSOR_VALID)
         return;
     if (flow->quality < 50)
-        return; /* 质量太低, 跳过 */
+        return;
     if (flow->distance_m <= 0)
-        return; /* 无有效高度信息 */
+        return;
 
-    /* 光流输出已经是线速度 (rad/s × height = m/s) */
     float z[2] = {flow->integrated_x, flow->integrated_y};
 
-    /* 预测量测: h = (R · v_world)[0:2] (机体系 XY 速度) */
     float R[3][3];
     ekf_get_rotmat(ekf, R, NULL);
 
+    /* 预测量测: h = R_w2b · v_world (世界系速度转到机体系) */
     float v_world[3] = {
         ekf->state.vel.x, ekf->state.vel.y, ekf->state.vel.z};
     float v_body[3];
@@ -1197,7 +1201,11 @@ void ekf_update_optflow(ekf_t* ekf, const ekf_optflow_t* flow) {
 
     /* 雅可比 H (2×15):
      *   ∂h/∂δv = R[0:2, :]
-     *   ∂h/∂δθ = -(R · [v_world]×)[0:2, :]
+     *   ∂h/∂δθ = +[R · v_world]×[0:2, :]
+     *
+     * 推导: h = R_true · v_world, R_true = (I - [δθ]×)·R
+     *   δh = R·δv - [δθ]×·R·v_world
+     *      = R·δv + [R·v_world]×·δθ
      */
     float H_flow[MAX_MDIM][ESDIM];
     memset(H_flow, 0, sizeof(H_flow));
@@ -1207,19 +1215,19 @@ void ekf_update_optflow(ekf_t* ekf, const ekf_optflow_t* flow) {
         for (int j = 0; j < 3; j++)
             H_flow[i][3 + j] = R[i][j];
 
-    /* ∂h/∂δθ: H[0:2, 6:9] = -(R · [v_world]×) 的前两行 */
-    float skew_vw[3][3], R_skew_vw[3][3];
-    m3_skew(v_world, skew_vw);
-    m3_mul(R, skew_vw, R_skew_vw);
+    /* ∂h/∂δθ: H[0:2, 6:9] = +[R · v_world]× 的前两行 */
+    float Rv[3];
+    m3_mul_v(R, v_world, Rv);
+    float skew_Rv[3][3];
+    m3_skew(Rv, skew_Rv);
 
     for (int i = 0; i < 2; i++)
         for (int j = 0; j < 3; j++)
-            H_flow[i][6 + j] = -R_skew_vw[i][j];
+            H_flow[i][6 + j] = skew_Rv[i][j]; /* 正号 */
 
-    /* 噪声: 取决于高度和光流质量 */
+    /* 噪声 */
     float h_agl = flow->distance_m;
     float sigma_base = ekf->noise.optflow_noise / (h_agl > 0.3f ? h_agl : 0.3f);
-    /* 质量越低, 噪声越大 */
     float quality_factor = 1.0f + (100.0f - (float)flow->quality) / 100.0f * 3.0f;
     float sigma2 = sigma_base * sigma_base * quality_factor;
 
