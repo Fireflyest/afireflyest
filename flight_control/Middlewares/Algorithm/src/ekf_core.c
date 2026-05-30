@@ -458,8 +458,8 @@ int ekf_align(ekf_t* ekf,
      *   pitch = atan2(ax, sqrt(ay²+az²))
      * (FRD 约定, 静止时 [ax,ay,az] ≈ [0,0,-g])
      */
-    float roll = atan2f(ay, -az);
-    float pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
+    float roll = atan2f(-ay, -az);                       // 右倾时 ay<0 → -ay>0 → +φ
+    float pitch = atan2f(ax, sqrtf(ay * ay + az * az));  // 抬头时 ax>0 → +θ
     float yaw = 0.0f;
 
     /* ---- Step 3: 由磁力计估计 yaw ---- */
