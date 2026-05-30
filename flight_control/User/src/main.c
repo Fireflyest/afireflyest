@@ -138,54 +138,6 @@ int main() {
     UI_Logger_AddLine(&logWindow, buf);
 
 
-
-
-
-    // uint8_t raw[7];
-    // SPI_Sensor_ReadBytes(mmc.sensor_id, 0x00, raw, 7);
-
-    // char text[32];
-    // snprintf(text, sizeof(text), "%02X %02X %02X %02X %02X %02X %02X",
-    //          raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6]);
-    // UI_Logger_AddLine(&logWindow, text);
-
-    // /* 直接读 mag_data，打印 uint32_t */
-    // MMC5983MA_ReadMagRaw(&mmc, &mag_data);
-
-    // snprintf(text, sizeof(text), "x:%lu", (unsigned long)mag_data.x);
-    // UI_Logger_AddLine(&logWindow, text);
-    // snprintf(text, sizeof(text), "y:%lu", (unsigned long)mag_data.y);
-    // UI_Logger_AddLine(&logWindow, text);
-    // snprintf(text, sizeof(text), "z:%lu", (unsigned long)mag_data.z);
-    // UI_Logger_AddLine(&logWindow, text);
-
-    // {
-    //     uint8_t raw7[7] = {0};
-
-    //     /* 手动 SET → TM_M → 读取，和驱动一样 */
-    //     uint8_t cmd;
-    //     cmd = 0x08; /* SET */
-    //     SPI_Sensor_WriteBytes(mmc.sensor_id, 0x09, &cmd, 1);
-    //     Delay_ms(2);
-    //     cmd = 0x01; /* TM_M */
-    //     SPI_Sensor_WriteBytes(mmc.sensor_id, 0x09, &cmd, 1);
-    //     Delay_ms(15);
-
-    //     SPI_Sensor_ReadBytes(mmc.sensor_id, 0x00, raw7, 7);
-
-    //     char text[40];
-    //     snprintf(text, sizeof(text), "%02X %02X %02X %02X %02X %02X %02X",
-    //              raw7[0], raw7[1], raw7[2], raw7[3], raw7[4], raw7[5], raw7[6]);
-    //     UI_Logger_AddLine(&logWindow, text);
-    // }
-
-    // sm_vec3_t mag;
-    // Attitude_GetMag(mag);
-
-    // char text[32];
-    // snprintf(text, sizeof(text), "mag z:%d", (int)(mag[2] * 1000));
-    // UI_Logger_AddLine(&logWindow, text);
-
     sm_vec3_t accel_bias = {0.0f, 0.0f, 0.0f};
     sm_vec3_t accel_scale = {1.0f, 1.0f, 1.0f};
     uint8_t read = Persistence_ReadCalibData(PERSISTENCE_DATA_MARKER, accel_bias, accel_scale);
@@ -213,7 +165,7 @@ int main() {
     Command_SetLandCallback(Control_Land);
     Command_SetHoverCallback(Control_Hover);
 
-    Window_To(WINDOW_IMU);
+    Window_To(WINDOW_CUBE);
 
     // TaskHandle_t xExampleTaskHandle = NULL;
     // ( void ) xTaskCreate( exampleTask,

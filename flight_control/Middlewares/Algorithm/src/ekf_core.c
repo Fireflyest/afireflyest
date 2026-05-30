@@ -490,7 +490,11 @@ int ekf_align(ekf_t* ekf,
         float mb[3] = {mx, my, mz};
         float R_T[3][3];
         m3_trans(R_init.m, R_T);
-        m3_mul_v(R_T, mb, ref->m_earth.x); /* 借用 vec3 的地址布局 */
+        float m_earth_arr[3];
+        m3_mul_v(R_T, mb, m_earth_arr);
+        ref->m_earth.x = m_earth_arr[0];
+        ref->m_earth.y = m_earth_arr[1];
+        ref->m_earth.z = m_earth_arr[2];
 
         ref->total_field = sqrtf(ref->m_earth.x * ref->m_earth.x +
                                  ref->m_earth.y * ref->m_earth.y +
@@ -1159,7 +1163,8 @@ void ekf_update_baro(ekf_t* ekf, const ekf_baro_t* baro) {
     H_baro[0][2] = -1.0f; /* ∂h/∂δp_D = -1 */
 
     float sigma2 = ekf->noise.baro_noise * ekf->noise.baro_noise;
-    float R_baro[1][1] = {{sigma2}};
+    float R_baro[MAX_MDIM][MAX_MDIM] = {{0}};
+    R_baro[0][0] = sigma2;
 
     ekf_update_generic(ekf, z, h_pred, H_baro, R_baro, 1);
 }

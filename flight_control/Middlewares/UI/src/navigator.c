@@ -1,4 +1,5 @@
 #include "navigator.h"
+#include <string.h>
 
 UI_Logger logWindow;
 

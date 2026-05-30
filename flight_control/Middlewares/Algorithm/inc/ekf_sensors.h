@@ -3,6 +3,18 @@
  * @brief EKF 四旋翼无人机 — 传感器输入约定与测量模型
  *
  * ============================================================================
+ *  坐标系与旋转矩阵约定
+ * ============================================================================
+ *
+ *  机体系 (Body Frame): FRD  — X 前, Y 右, Z 下
+ *  导航系 (Nav Frame):  NED  — X 北, Y 东, Z 下
+ *
+ *  旋转矩阵 R 的约定:
+ *    R = R_earth_to_body, 即 v_body = R * v_earth
+ *    若四元数 q 定义为 body→earth 则 R = R_body_to_earth(q)^T
+ *    所有观测模型中 R 的含义统一为此。
+ *
+ * ============================================================================
  *  传感器输入总览
  * ============================================================================
  *
@@ -14,16 +26,19 @@
  *  │             │  自由落体: [0, 0, 0]     (失重)                           │
  *  │             │  右倾 90° 静止: [0, -g, 0]                                │
  *  │             │  倒扣静止: [0, 0, +g]                                     │
+ *  │             │  机头朝上 90° 静止: [+g, 0, 0]                            │
+ *  │             │  机头朝下 90° 静止: [-g, 0, 0]                            │
  *  ├─────────────┼────────────────────────────────────────────────────────────┤
  *  │  陀螺仪      │  机体系 FRD 角速度，单位 rad/s                            │
  *  │             │  ω_x: roll rate  (右翼下沉为正)                           │
- *  │             │  ω_y: pitch rate (机头向下为正)                           │
+ *  │             │  ω_y: pitch rate (机头向上为正)                           │
  *  │             │  ω_z: yaw rate   (俯视顺时针为正)                         │
  *  │             │  静止时理想输出: [0, 0, 0] (实际含 bias drift)             │
  *  ├─────────────┼────────────────────────────────────────────────────────────┤
  *  │  磁力计      │  机体系 FRD 地磁向量，单位 μT                             │
- *  │             │  水平朝北时: [mag_N, mag_E, 0] (受当地磁偏角/磁倾角影响)    │
- *  │             │  水平朝东时: [mag_E, -mag_N, 0]                           │
+ *  │             │  水平朝北时: [m_N, m_E, m_D] (受当地磁偏角/磁倾角影响)     │
+ *  │             │  水平朝东时: [m_E, -m_N, m_D]                            │
+ *  │             │  其中 m_N, m_E, m_D 为当地 NED 系地磁参考分量              │
  *  │             │  初始化时需采集当地地磁参考，补偿磁偏角 (declination)        │
  *  ├─────────────┼────────────────────────────────────────────────────────────┤
  *  │  气压计      │  相对高度 h，单位 m，向上为正                              │
@@ -32,19 +47,22 @@
  *  │  GPS         │  [lat(°), lon(°), alt(m)] WGS-84                        │
  *  │             │  内部转换为 NED 局部平面: N=m, E=m, D=-alt                 │
  *  ├─────────────┼────────────────────────────────────────────────────────────┤
- *  │  光流        │  机体系水平速度估计 [v_x, v_y]，单位 m/s                   │
- *  │             │  v_x: 沿 X_b (前方) 分量                                  │
- *  │             │  v_y: 沿 Y_b (右侧) 分量                                  │
+ *  │  光流        │  机体系水平面积分角位移 [integrated_x, integrated_y], rad   │
+ *  │             │  integrated_x: 沿 X_b (前方) 积分角位移                    │
+ *  │             │  integrated_y: 沿 Y_b (右侧) 积分角位移                    │
+ *  │             │  乘以距地高度 h_agl 可转换为线位移                          │
  *  └─────────────┴────────────────────────────────────────────────────────────┘
  *
  * ============================================================================
  *  观测模型说明
  * ============================================================================
  *
+ *  (R 为 earth→body 旋转矩阵, g = 9.81 m/s²)
+ *
  *  加速度计观测模型 (静止/低速):
  *      a_measured = R * (a_world - g_world) + bias + noise
  *      其中 g_world = [0, 0, +g] (NED 系重力向量)
- *      静止时 a_world = 0, 故 a_measured = -R * [0,0,g] + bias
+ *      静止时 a_world = 0, 故 a_measured = R * [0,0,-g] + bias
  *      水平时: a_measured ≈ [0, 0, -g]
  *
  *  磁力计观测模型:
@@ -56,15 +74,16 @@
  *      (NED 系 D 轴向下为正，高度向上为正，故取负)
  *
  *  GPS 观测模型:
- *      直接观测 NED 位置 [p_N, p_E] (水平) 和速度 [v_N, v_E, v_D]
- *      高度: h_GPS = -p_D
+ *      位置: z = [p_N, p_E, p_D],  h(x) = [x[PN], x[PE], x[PD]]  (全部 NED)
+ *      速度: z = [v_N, v_E, v_D],  h(x) = [x[VN], x[VE], x[VD]]
+ *      高度: h_GPS = -p_D  (若需向上高度，从 NED D 分量取反)
  *
  * ============================================================================
  *  传感器数据有效性标记
  * ============================================================================
  *
- *  每个传感器数据包包含 timestamp 和 valid 标记。
- *  EKF 仅在 valid = 1 且 timestamp > 上次更新时间时使用该数据。
+ *  每个传感器数据包包含 timestamp 和 status 标记。
+ *  EKF 仅在 status = EKF_SENSOR_VALID 且 timestamp > 上次更新时间时使用该数据。
  *  传感器之间的采样率可以不同 (异步量测更新)。
  */
 
@@ -128,7 +147,7 @@ typedef struct {
  *
  * 角速度定义 (右手定则):
  *   ω_x: Roll rate  — 右翼下沉方向为正
- *   ω_y: Pitch rate — 机头向下方向为正
+ *   ω_y: Pitch rate — 机头向上方向为正
  *   ω_z: Yaw rate   — 俯视顺时针 (机头右偏) 为正
  *
  * 理想静止输出: [0, 0, 0] rad/s
@@ -164,14 +183,17 @@ typedef struct {
  *   │  右倾 90° 静止        │  [0, -9.81, 0]       │
  *   │  左倾 90° 静止        │  [0, +9.81, 0]       │
  *   │  倒扣静止             │  [0, 0, +9.81]       │
- *   │  机头朝上垂直悬停     │  [0, 0, -9.81]       │
- *   │  机头朝下垂直悬停     │  [0, 0, +9.81]       │
+ *   │  机头朝上 90° 静止    │  [+9.81, 0, 0]       │
+ *   │  机头朝下 90° 静止    │  [-9.81, 0, 0]       │
  *   │  自由落体             │  [0, 0, 0]           │
  *   │  北向加速 1m/s²       │  [+1, 0, -9.81]      │
  *   └──────────────────────┴──────────────────────┘
  *
- *   关键: Z 轴向上 (-Z 指天) 时读数为负。
- *         静止时加速度计读数 = -重力在机体系的投影。
+ *   验证 (机头朝上 90°, θ=+90°):
+ *     R_y(+90°) = [[0, 0, -1],[0, 1, 0],[1, 0, 0]]
+ *     f_body = R_y(+90°) * [0, 0, -g]ᵀ = [+g, 0, 0]  ✓
+ *
+ *   关键: 静止时加速度计读数 = -重力在机体系的投影。
  *
  * EKF 姿态观测原理:
  *   加速度计在静止/低速时可提供 roll 和 pitch 的观测量，
@@ -190,11 +212,18 @@ typedef struct {
  *
  * 多数 IMU 芯片同时输出角速度和加速度，时间戳相同。
  * 使用此结构可保证两个测量在 EKF predict 步骤中同步使用。
+ *
+ * 注意: header 仅一份，陀螺仪和加速度计共享同一时间戳。
+ *       子结构不含独立 header，避免时间戳冗余。
  */
 typedef struct {
-    ekf_sensor_header_t header; /**< 公共头部 (两个传感器共用)   */
-    ekf_gyro_t gyro;            /**< 陀螺仪数据                  */
-    ekf_accel_t accel;          /**< 加速度计数据                 */
+    ekf_sensor_header_t header; /**< 公共头部 (陀螺仪+加速度计共用) */
+    float omega_x;              /**< X 轴角速度 (rad/s), roll rate  */
+    float omega_y;              /**< Y 轴角速度 (rad/s), pitch rate */
+    float omega_z;              /**< Z 轴角速度 (rad/s), yaw rate   */
+    float a_x;                  /**< X 轴加速度 (m/s²), 机头前方    */
+    float a_y;                  /**< Y 轴加速度 (m/s²), 右侧        */
+    float a_z;                  /**< Z 轴加速度 (m/s²), 机腹下方    */
 } ekf_imu_t;
 
 /* ========================================================================== */
@@ -225,8 +254,8 @@ typedef struct {
  *   4. 存储参考向量 m_earth = [m_N, m_E, m_D] 供 EKF 观测模型使用
  *
  * 观测模型:
- *   m_measured = R(q) * m_earth + bias + noise
- *   其中 R(q) 为当前姿态对应的旋转矩阵
+ *   m_measured = R * m_earth + bias + noise
+ *   其中 R 为 earth→body 旋转矩阵
  */
 typedef struct {
     ekf_sensor_header_t header; /**< 公共头部: 时间戳 + 有效性   */
@@ -265,9 +294,9 @@ typedef struct {
  * EKF 使用: 转换为 NED 局部平面坐标
  *
  * 坐标转换:
- *   N (m) = (lat - lat_ref) * R_earth        (北向)
- *   E (m) = (lon - lon_ref) * R_earth * cos(lat_ref)  (东向)
- *   D (m) = -(alt - alt_ref)                 (地向，高度取负)
+ *   N (m) = (lat - lat_ref) * π/180 * R_earth        (北向)
+ *   E (m) = (lon - lon_ref) * π/180 * R_earth * cos(lat_ref)  (东向)
+ *   D (m) = -(alt - alt_ref)                         (地向，高度取负)
  *
  * GPS 数据标记:
  *   fix_type: 0=无定位, 2=2D, 3=3D, 4=DGPS, 5=RTK Float, 6=RTK Fix
@@ -295,11 +324,15 @@ typedef struct {
 /**
  * @brief 光流测量数据
  *
- * 测量机体系水平面上的视在速度。
+ * 测量机体系水平面上的积分角位移 (非速度)。
  *
  * 输出约定:
- *   v_x: 沿 X_b (机头前方) 的视在速度 (m/s)，前方运动为正
- *   v_y: 沿 Y_b (机翼右侧) 的视在速度 (m/s)，右方运动为正
+ *   integrated_x: 沿 X_b (机头前方) 积分角位移 (rad)
+ *   integrated_y: 沿 Y_b (机翼右侧) 积分角位移 (rad)
+ *
+ * 转换为线速度:
+ *   积分期间线位移 ≈ 积分角位移 × 距地高度 (h_agl)
+ *   瞬时线速度 ≈ 角速度 × h_agl
  *
  * 高度依赖性:
  *   光流原始输出为角速度 (rad/s)，需乘以距地高度转换为线速度:
@@ -313,8 +346,8 @@ typedef struct {
  */
 typedef struct {
     ekf_sensor_header_t header; /**< 公共头部: 时间戳 + 有效性    */
-    float integrated_x;         /**< X 方向积分位移 (rad 或 m)    */
-    float integrated_y;         /**< Y 方向积分位移 (rad 或 m)    */
+    float integrated_x;         /**< X 方向积分角位移 (rad)       */
+    float integrated_y;         /**< Y 方向积分角位移 (rad)       */
     float integrated_xgyro;     /**< 积分期间陀螺仪 X 角位移 (rad) */
     float integrated_ygyro;     /**< 积分期间陀螺仪 Y 角位移 (rad) */
     float distance_m;           /**< 距地高度 (m), 无效时为 -1    */
@@ -328,20 +361,27 @@ typedef struct {
 /**
  * @brief EKF 传感器噪声参数
  *
- * 所有噪声参数均为连续时间白噪声强度，EKF 内部根据 Δt 离散化:
- *   Q_discrete = Q_continuous * Δt     (随机游走)
- *   Q_discrete = Q_continuous / Δt     (白噪声传播到状态)
+ * 噪声参数的离散化规则 (EKF 内部根据 Δt 计算):
  *
- * 典型值参考 (需根据实际传感器手册调整):
+ *   随机游走驱动噪声 — 参数单位 [unit]²/s:
+ *     Q_discrete = Q_continuous × Δt
+ *     例: gyro_bias_noise (rad/s/√s) → Q_d = σ² × Δt
+ *
+ *   白噪声等效离散方差 — 参数单位 [unit]²/Hz:
+ *     Q_discrete = Q_continuous / Δt = Q_continuous × f_s
+ *     例: gyro_noise (rad/s/√Hz) → Q_d = σ² / Δt
+ *
+ * 典型值参考 (需根据实际传感器手册和 Allan 方差测试调整):
  *
  *   参数                典型值            单位
- *   ─────────────────────────────────────────
+ *   ─────────────────────────────────────────────
  *   gyro_noise          1e-3 ~ 1e-2     rad/s/√Hz
- *   gyro_bias_noise     1e-5 ~ 1e-4     rad/s/√s  (random walk)
+ *   gyro_bias_noise     1e-5 ~ 1e-4     rad/s/√s   (random walk)
  *   accel_noise         1e-2 ~ 1e-1     m/s²/√Hz
- *   accel_bias_noise    1e-3 ~ 1e-2     m/s²/√s   (random walk)
+ *   accel_bias_noise    1e-3 ~ 1e-2     m/s²/√s    (random walk)
  *   mag_noise           0.1 ~ 1.0       μT/√Hz
  *   baro_noise          0.1 ~ 1.0       m/√Hz
+ *   baro_bias_noise     1e-2 ~ 1e-1     m/√s       (random walk)
  *   gps_pos_noise       0.5 ~ 5.0       m (1σ)
  *   gps_vel_noise       0.1 ~ 1.0       m/s (1σ)
  *   optflow_noise       0.01 ~ 0.1      rad/s/√Hz
@@ -443,7 +483,7 @@ void ekf_gps_origin_init(ekf_gps_origin_t* origin,
  * @brief 观测向量索引 — 加速度计观测
  *
  * 加速度计提供 roll/pitch 信息，观测向量维度 = 3
- * z = [a_x, a_y, a_z], h(x) = R(q) * [0, 0, -g] (静止近似)
+ * z = [a_x, a_y, a_z], h(x) = R * [0, 0, -g] (静止近似, R 为 earth→body)
  */
 typedef enum {
     EKF_OBS_ACCEL_X = 0,
@@ -456,7 +496,7 @@ typedef enum {
  * @brief 观测向量索引 — 磁力计观测
  *
  * 磁力计提供 yaw 信息，观测向量维度 = 3 (或 2，忽略 Z 轴)
- * z = [m_x, m_y, m_z], h(x) = R(q) * m_earth
+ * z = [m_x, m_y, m_z], h(x) = R * m_earth  (R 为 earth→body)
  */
 typedef enum {
     EKF_OBS_MAG_X = 0,
@@ -468,7 +508,9 @@ typedef enum {
 /**
  * @brief 观测向量索引 — GPS 位置观测
  *
- * z = [p_N, p_E, -h], h(x) = [x[PN], x[PE], -x[PD]]
+ * 全部使用 NED 坐标:
+ * z = [p_N, p_E, p_D], h(x) = [x[PN], x[PE], x[PD]]
+ * 若需向上高度: h_GPS = -p_D = -x[PD]
  */
 typedef enum {
     EKF_OBS_GPS_N = 0,
@@ -504,7 +546,7 @@ typedef enum {
  * @brief 观测向量索引 — 光流观测
  *
  * z = [v_x_body, v_y_body]
- * h(x) = R(q) * [v_N, v_E, v_D] 的 X,Y 分量 (机体系水平速度)
+ * h(x) = (R * [v_N, v_E, v_D]) 的 X,Y 分量  (R 为 earth→body)
  * 观测维度 = 2
  */
 typedef enum {
@@ -521,7 +563,7 @@ typedef enum {
  * @brief 当地地磁参考向量 (NED 系)
  *
  * 初始化时由磁力计标定得到，用于 EKF 磁力计观测模型:
- *   h(x) = R(q) * m_earth_ref
+ *   h(x) = R * m_earth_ref  (R 为 earth→body)
  *
  * 同时存储磁偏角供航向校正使用:
  *   真北航向 = 磁航向 + declination
