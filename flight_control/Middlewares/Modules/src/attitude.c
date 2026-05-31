@@ -111,6 +111,7 @@ static Calib_Accel_t accel_calib;
 
 static Calib_Mag_Handle_t mag_calib_handle;
 static Calib_Mag_t mag_calib;
+static uint8_t mag_ref_needs_update = 0;
 
 /* ========================================================================== */
 /*  滤波器                                                                     */
@@ -180,7 +181,7 @@ static void attitude_try_align(void) {
     float yaw = 0.0f;
 
     /* ---- 由磁力计估计 Yaw ---- */
-    if (align_mag_count > 10) {
+    if (align_mag_count > 10 && mag_calib.is_valid) {
         float mn = (float)align_mag_count;
         float mx = align_sum_mx / mn;
         float my = align_sum_my / mn;
@@ -232,7 +233,7 @@ static void attitude_try_align(void) {
     /* ---- 设置 EKF 初始状态 ---- */
     ekf_state_init_default(&ekf.state);
 
-    ekf.state.pos.z = -g_init_altitude;
+    ekf.state.pos.z = -altitude_filter.output;
 
     /* 姿态 */
     ekf_euler_t euler_init = {roll, pitch, yaw};
@@ -258,6 +259,30 @@ static void attitude_try_align(void) {
 
     ekf.initialized = 1;
     att_state = ATT_RUNNING;
+}
+
+static void update_mag_reference(void) {
+    if (!ekf.initialized)
+        return;
+
+    ekf_mat3_t Rm;
+    ekf_quat_to_rotmat(&ekf.state.quat, &Rm);
+
+    float mb[3] = {mag_current[0], mag_current[1], mag_current[2]};
+
+    /* m_earth = R_b2w · m_body = Rm^T · m_body */
+    ekf.mag_ref.m_earth.x = Rm.m[0][0] * mb[0] + Rm.m[1][0] * mb[1] + Rm.m[2][0] * mb[2];
+    ekf.mag_ref.m_earth.y = Rm.m[0][1] * mb[0] + Rm.m[1][1] * mb[1] + Rm.m[2][1] * mb[2];
+    ekf.mag_ref.m_earth.z = Rm.m[0][2] * mb[0] + Rm.m[1][2] * mb[1] + Rm.m[2][2] * mb[2];
+
+    float mex = ekf.mag_ref.m_earth.x;
+    float mey = ekf.mag_ref.m_earth.y;
+    float mez = ekf.mag_ref.m_earth.z;
+
+    ekf.mag_ref.total_field = sqrtf(mex * mex + mey * mey + mez * mez);
+    ekf.mag_ref.declination = atan2f(mey, mex);
+    ekf.mag_ref.inclination = atan2f(-mez, sqrtf(mex * mex + mey * mey));
+    ekf.mag_ref.calibrated = 1;
 }
 
 /* ========================================================================== */
@@ -288,6 +313,7 @@ void Attitude_Init(sm_vec3_t accel_bias, sm_vec3_t accel_scale, float init_altit
     Calib_Mag_Init(&mag_calib_handle);
     accel_calib.is_valid = 0;
     mag_calib.is_valid = 0;
+    mag_ref_needs_update = 0;
 
     /* ---- 从 Flash 加载校准参数 (加速度计 + 磁力计) ---- */
     {
@@ -389,6 +415,7 @@ void Attitude_Update(float dt) {
         if (mag_calib_handle.state == CALIB_MAG_DONE) {
             mag_calib = mag_calib_handle.calib;
             persistence_save();
+            mag_ref_needs_update = 1;
         }
     }
 
@@ -423,6 +450,14 @@ void Attitude_Update(float dt) {
         accel_current[0] = accel_cal[0];
         accel_current[1] = accel_cal[1];
         accel_current[2] = accel_cal[2];
+    }
+
+    if (mag_ref_needs_update && ekf.initialized) {
+        /* 此时 mag_current 已经过 Calib_Mag_Apply 校准 (Step 2b)
+         * 且 EKF 姿态基本正确 (仅 yaw 可能偏)
+         * 用当前姿态 + 校准后 mag 重建参考 */
+        update_mag_reference();
+        mag_ref_needs_update = 0;
     }
 
     /* ================================================================== */
