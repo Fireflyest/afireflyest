@@ -400,9 +400,17 @@ void Attitude_Update(float dt) {
      *   水平转一圈, MX 应在 ±m_N 间振荡 (约 ±30 μT)
      *   总强度 sqrt(MX²+MY²+MZ²) 应恒定 (约 45~60 μT)
      */
-    mag_current[0] = (int16_t)((mag_rx_buf[1] << 8) | mag_rx_buf[0]) * 0.02441f;
-    mag_current[1] = (int16_t)((mag_rx_buf[3] << 8) | mag_rx_buf[2]) * 0.02441f;
-    mag_current[2] = -(int16_t)((mag_rx_buf[5] << 8) | mag_rx_buf[4]) * 0.02441f;
+    float raw_mx = (int16_t)((mag_rx_buf[1] << 8) | mag_rx_buf[0]) * 0.02441f;
+    float raw_my = (int16_t)((mag_rx_buf[3] << 8) | mag_rx_buf[2]) * 0.02441f;
+    float raw_mz = (int16_t)((mag_rx_buf[5] << 8) | mag_rx_buf[4]) * 0.02441f;
+
+    {
+        static const float mc = 0.799f; /* cos(37°) */
+        static const float ms = 0.602f; /* sin(37°) */
+        mag_current[0] = mc * raw_mx + ms * raw_my;
+        mag_current[1] = -ms * raw_mx + mc * raw_my;
+        mag_current[2] = -raw_mz;
+    }
 
     /* ================================================================== */
     /*  Step 2: 传感器校准                                                  */
@@ -420,13 +428,13 @@ void Attitude_Update(float dt) {
     }
 
     /* ---- 2b. 应用磁力计校准 ---- */
-    if (mag_calib.is_valid) {
-        float mag_cal[3];
-        Calib_Mag_Apply(&mag_calib, mag_current, mag_cal);
-        mag_current[0] = mag_cal[0];
-        mag_current[1] = mag_cal[1];
-        mag_current[2] = mag_cal[2];
-    }
+    // if (mag_calib.is_valid) {
+    //     float mag_cal[3];
+    //     Calib_Mag_Apply(&mag_calib, mag_current, mag_cal);
+    //     mag_current[0] = mag_cal[0];
+    //     mag_current[1] = mag_cal[1];
+    //     mag_current[2] = mag_cal[2];
+    // }
 
     /* ---- 2c. 加速度计校准采集 (需要静止) ---- */
     if (calib_handle.state == CALIB_ACCEL_COLLECTING &&
