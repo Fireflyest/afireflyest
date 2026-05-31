@@ -77,4 +77,24 @@ void Attitude_Calibrate(void);
 /** @brief 获取当前校准面编号 */
 void Attitude_CalibratingFace(uint8_t* face);
 
+/**
+ * @brief 开始磁力计校准
+ *        调用后缓慢旋转飞行器，覆盖所有方向 (约 10 秒)
+ */
+void Attitude_StartMagCalibrate(void);
+
+/**
+ * @brief 获取磁力计校准进度 (0.0 ~ 1.0)
+ * @return 各轴覆盖度最小值, 1.0 = 校准条件已满足
+ */
+float Attitude_MagCalibrateProgress(void);
+
+/**
+ * @brief 获取磁力计校准状态
+ * @return 0=空闲, 1=采集中, 2=完成, 3=失败
+ */
+uint8_t Attitude_MagCalibStatus(void);
+
+uint8_t Attitude_MagCalibValid(void);
+
 #endif /* ATTITUDE_H */

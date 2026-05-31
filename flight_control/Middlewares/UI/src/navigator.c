@@ -105,10 +105,10 @@ void UI_IMU_Draw(UI_Widget* widget) {
     snprintf(line, sizeof(line), "AZ %6d GZ %6d", (int)(accel[2] * 10), (int)(gyro[2] * 10));
     GFX_DrawString(x, y + 2 * lh, line, GFX_COLOR_WHITE);
 
-    snprintf(line, sizeof(line), "MX %6d MY %6d", (int)(mag[0] * 1000), (int)(mag[1] * 1000));
+    snprintf(line, sizeof(line), "MX %6d MY %6d", (int)(mag[0]), (int)(mag[1]));
     GFX_DrawString(x, y + 3 * lh, line, GFX_COLOR_WHITE);
 
-    snprintf(line, sizeof(line), "MZ %6d", (int)(mag[2] * 1000));
+    snprintf(line, sizeof(line), "MZ %6d", (int)(mag[2]));
     GFX_DrawString(x, y + 4 * lh, line, GFX_COLOR_WHITE);
 
     // {
@@ -192,28 +192,61 @@ void UI_Cube_Draw(UI_Widget* widget) {
     Attitude_IsStill(&still);
     Attitude_CalibratingFace(&accel_clib_face);
     Attitude_GetVelocityZ(&velocityZ);
-    snprintf(line, sizeof(line), "S: %d", still);
-    GFX_DrawString(0, 10, line, GFX_COLOR_WHITE);
-    snprintf(line, sizeof(line), "F: %d", accel_clib_face);
-    GFX_DrawString(0, 20, line, GFX_COLOR_WHITE);
-    snprintf(line, sizeof(line), "V: %d.%d", (int)velocityZ, (int)(fabsf(velocityZ) * 10.0f) % 10);
-    GFX_DrawString(0, 40, line, GFX_COLOR_WHITE);
+
+    /* 状态 */
+    snprintf(line, sizeof(line), "S:%d F:%d", still, accel_clib_face);
+    GFX_DrawString(0, 0, line, GFX_COLOR_WHITE);
+
+    /* 磁力计校准 */
+    {
+        uint8_t mag_st = Attitude_MagCalibStatus();
+        float mag_pct = Attitude_MagCalibrateProgress();
+        switch (mag_st) {
+        case 1:
+            snprintf(line, sizeof(line), "M:%3d%%", (int)(mag_pct * 100.0f));
+            break;
+        case 2:
+            snprintf(line, sizeof(line), "M: OK");
+            break;
+        case 3:
+            snprintf(line, sizeof(line), "M: ERR");
+            break;
+        default:
+            snprintf(line, sizeof(line), "M: --");
+            break;
+        }
+        GFX_DrawString(0, 10, line, GFX_COLOR_WHITE);
+    }
+
+    /* 高度 */
     {
         float alt;
         Attitude_GetAltitude(&alt);
-        float a = alt;
-        int sign = (a < 0.0f) ? -1 : 1;
-        if (sign < 0) a = -a;
+        int sign = (alt < 0.0f) ? -1 : 1;
+        if (sign < 0)
+            alt = -alt;
+        int intPart = (int)alt;
+        int fracPart = (int)((alt - (float)intPart) * 10.0f + 0.5f);
+        if (fracPart >= 10) {
+            intPart += 1;
+            fracPart = 0;
+        }
+        if (sign < 0)
+            intPart = -intPart;
+        snprintf(line, sizeof(line), "H:%d.%d", intPart, fracPart);
+        GFX_DrawString(0, 20, line, GFX_COLOR_WHITE);
+    }
 
-        int intPart = (int)a;
-        int fracPart = (int)((a - (float)intPart) * 10.0f + 0.5f); // 一位小数并四舍五入
-        if (fracPart >= 10) { intPart += 1; fracPart = 0; }
-        if (sign < 0) intPart = -intPart;
-
-        char altLine[16];
-        snprintf(altLine, sizeof(altLine), "H: %d.%d", intPart, fracPart);
-
-        GFX_DrawString(0, 30, altLine, GFX_COLOR_WHITE);    // 整数部分
+    /* 垂直速度 */
+    {
+        int sign = (velocityZ < 0.0f) ? -1 : 1;
+        float av = fabsf(velocityZ);
+        int vi = (int)av;
+        int vf = (int)(av * 10.0f) % 10;
+        if (sign < 0)
+            vi = -vi;
+        snprintf(line, sizeof(line), "V:%d.%d", vi, vf);
+        GFX_DrawString(0, 30, line, GFX_COLOR_WHITE);
     }
 }
 

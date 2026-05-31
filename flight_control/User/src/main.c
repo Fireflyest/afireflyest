@@ -137,12 +137,10 @@ int main() {
     snprintf(buf, sizeof(buf), "MMC5983MA: %d %d 0x%02X", mmc.sensor_id, mmc_ret, mag_who_am_i);
     UI_Logger_AddLine(&logWindow, buf);
 
-
-    sm_vec3_t accel_bias = {0.0f, 0.0f, 0.0f};
-    sm_vec3_t accel_scale = {1.0f, 1.0f, 1.0f};
-    uint8_t read = Persistence_ReadCalibData(PERSISTENCE_DATA_MARKER, accel_bias, accel_scale);
+    /* Attitude_Init 内部自行从 Flash 加载 accel + mag 校准参数 */
+    sm_vec3_t accel_bias = {0}, accel_scale = {1, 1, 1};
     Attitude_Init(accel_bias, accel_scale, init_altitude);
-    snprintf(buf, sizeof(buf), "Flash: %d", read);
+
     UI_Logger_AddLine(&logWindow, buf);
 
     PWM_GPIO_Init();

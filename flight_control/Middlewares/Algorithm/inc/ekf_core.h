@@ -51,6 +51,7 @@ typedef struct {
 
     uint64_t last_predict_us;
     uint8_t initialized;
+    int baro_altitude_initialized;
 } ekf_t;
 
 /* ========================================================================== */
@@ -63,6 +64,13 @@ typedef struct {
  * @param[in]  noise 传感器噪声参数 (NULL 则使用默认值)
  */
 void ekf_init(ekf_t* ekf, const ekf_noise_params_t* noise);
+
+/**
+ * @brief 设置 EKF 初始高度 (NED 坐标)
+ * @param ekf       EKF 实例
+ * @param altitude  初始高度 (向上为正, m)
+ */
+void ekf_set_init_altitude(ekf_t* ekf, float altitude);
 
 /**
  * @brief 静止对准 — 初始化姿态和 bias

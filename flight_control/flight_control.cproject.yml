@@ -66,6 +66,7 @@ project:
         - file: ./Middlewares/Modules/src/ble.c
         - file: ./Middlewares/Modules/src/extra_sensor.c
         - file: ./Middlewares/Modules/src/calibrate_accel.c
+        - file: ./Middlewares/Modules/src/calibrate_mag.c
         - file: ./Middlewares/Modules/src/fps.c
         - file: ./Middlewares/Modules/src/key.c
         - file: ./Middlewares/Modules/src/led.c
