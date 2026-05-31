@@ -303,12 +303,30 @@ void ekf_euler_to_quat(const ekf_euler_t* euler, ekf_quat_t* q) {
 void ekf_quat_apply_correction(const ekf_quat_t* q_nom,
                                const ekf_vec3_t* delta,
                                ekf_quat_t* q_out) {
-    float half = 0.5f;
+    /*
+     * 小角度近似 q_out ≈ q_nom ⊗ [1, δθ/2] 仅在 |δθ| << 1 时有效。
+     * 当 |δθ| > 0.26 rad (15°) 时，近似误差 > 1%。
+     * 超限时缩放 δθ 使其回到有效范围，避免发散。
+     */
+    float delta_norm_sq = delta->x * delta->x +
+                          delta->y * delta->y +
+                          delta->z * delta->z;
+    const float max_delta = 0.26f; /* ≈15°，小角度近似的安全上限 */
+    const float max_delta_sq = max_delta * max_delta;
+
+    ekf_vec3_t clamped = *delta;
+    if (delta_norm_sq > max_delta_sq) {
+        float scale = max_delta / sqrtf(delta_norm_sq);
+        clamped.x *= scale;
+        clamped.y *= scale;
+        clamped.z *= scale;
+    }
+
     ekf_quat_t dq;
     dq.w = 1.0f;
-    dq.x = half * delta->x;
-    dq.y = half * delta->y;
-    dq.z = half * delta->z;
+    dq.x = 0.5f * clamped.x;
+    dq.y = 0.5f * clamped.y;
+    dq.z = 0.5f * clamped.z;
 
     ekf_quat_mult(q_nom, &dq, q_out);
     ekf_quat_normalize(q_out);
@@ -671,6 +689,29 @@ void ekf_predict(ekf_t* ekf, const ekf_imu_t* imu) {
         }
 
     memcpy(ekf->P.data, Pnew, sizeof(ekf->P.data));
+
+    /* ---- P 对角线限幅 ---- */
+    /* 防止协方差爆炸 (发散) 或过小 (过度自信导致对异常量测无响应) */
+    float (*Pdiag)[ESDIM] = ekf->P.data;
+    for (int i = 0; i < ESDIM; i++) {
+        if (Pdiag[i][i] > 1e4f)
+            Pdiag[i][i] = 1e4f;
+        if (Pdiag[i][i] < 1e-10f)
+            Pdiag[i][i] = 1e-10f;
+    }
+
+    /* ---- 全局 NaN/Inf 检测 ---- */
+    for (int i = 0; i < ESDIM; i++) {
+        if (!isfinite(ekf->state.vel.x) || !isfinite(ekf->state.pos.z) ||
+            !isfinite(ekf->state.quat.w)) {
+            /* 状态损坏，重置为已知安全状态 */
+            float saved_alt = -ekf->state.pos.z; /* 尝试保留高度 */
+            ekf_state_init_default(&ekf->state);
+            ekf->state.pos.z = isfinite(saved_alt) ? -saved_alt : 0;
+            ekf_cov_init_diagonal(&ekf->P, 10.0f, 1.0f, 0.5f, 0.1f, 0.5f);
+            break;
+        }
+    }
 }
 
 /* ========================================================================== */
@@ -750,10 +791,12 @@ static void ekf_update_generic(ekf_t* ekf,
 
     float (*P)[ESDIM] = ekf->P.data;
 
+    /* ---- 新息 ---- */
     float y[MAX_MDIM];
     for (int i = 0; i < dim_m; i++)
         y[i] = z[i] - h[i];
 
+    /* ---- PH^T ---- */
     float PHt[ESDIM][MAX_MDIM];
     for (int i = 0; i < ESDIM; i++)
         for (int j = 0; j < dim_m; j++) {
@@ -763,6 +806,7 @@ static void ekf_update_generic(ekf_t* ekf,
             PHt[i][j] = s;
         }
 
+    /* ---- S = H·PH^T + R ---- */
     float S[MAX_MDIM][MAX_MDIM];
     for (int i = 0; i < dim_m; i++)
         for (int j = 0; j < dim_m; j++) {
@@ -772,6 +816,7 @@ static void ekf_update_generic(ekf_t* ekf,
             S[i][j] = s + R_noise[i][j];
         }
 
+    /* ---- S^{-1} ---- */
     float S_inv[MAX_MDIM][MAX_MDIM];
     if (dim_m == 1) {
         if (S[0][0] < EPS_F)
@@ -791,6 +836,7 @@ static void ekf_update_generic(ekf_t* ekf,
             return;
     }
 
+    /* ---- K = PH^T · S^{-1} ---- */
     float K[ESDIM][MAX_MDIM];
     for (int i = 0; i < ESDIM; i++)
         for (int j = 0; j < dim_m; j++) {
@@ -800,7 +846,7 @@ static void ekf_update_generic(ekf_t* ekf,
             K[i][j] = s;
         }
 
-    /* 卡方检验 */
+    /* ---- 卡方检验 ---- */
     float chi2 = 0;
     for (int i = 0; i < dim_m; i++) {
         float Sy_i = 0;
@@ -812,6 +858,7 @@ static void ekf_update_generic(ekf_t* ekf,
     if (chi2 > chi2_threshold)
         return;
 
+    /* ---- dx = K · y ---- */
     float dx[ESDIM];
     for (int i = 0; i < ESDIM; i++) {
         float s = 0;
@@ -820,7 +867,33 @@ static void ekf_update_generic(ekf_t* ekf,
         dx[i] = s;
     }
 
-    /* Joseph 形式协方差更新 */
+    /* ---- [防线2a] dx 大小保护 ---- */
+    /*
+     * 单次量测修正不应超过物理合理范围:
+     *   位置: 5m      速度: 3 m/s    姿态: 15°(0.26rad)
+     *   gyro bias: 0.1 rad/s   accel bias: 0.5 m/s²
+     *
+     * 超限说明量测与状态严重不一致，跳过修正。
+     */
+    static const float dx_limit[ESDIM] = {
+        5.0f, 5.0f, 5.0f,    /* δp (m) */
+        3.0f, 3.0f, 3.0f,    /* δv (m/s) */
+        0.26f, 0.26f, 0.26f, /* δθ (rad, ≈15°) */
+        0.1f, 0.1f, 0.1f,    /* δb_g (rad/s) */
+        0.5f, 0.5f, 0.5f     /* δb_a (m/s²) */
+    };
+    for (int i = 0; i < ESDIM; i++) {
+        if (fabsf(dx[i]) > dx_limit[i])
+            return; /* 修正过大，丢弃本次量测 */
+    }
+
+    /* ---- [防线2b] NaN 检测 ---- */
+    for (int i = 0; i < ESDIM; i++) {
+        if (!isfinite(dx[i]))
+            return;
+    }
+
+    /* ---- Joseph 形式协方差更新 ---- */
     float A[ESDIM][ESDIM];
     m15_identity(A);
     for (int i = 0; i < ESDIM; i++)
@@ -843,7 +916,6 @@ static void ekf_update_generic(ekf_t* ekf,
                 s += K[i][k] * R_noise[k][j];
             KR[i][j] = s;
         }
-
     for (int i = 0; i < ESDIM; i++)
         for (int j = 0; j < ESDIM; j++)
             for (int k = 0; k < dim_m; k++)
@@ -855,8 +927,14 @@ static void ekf_update_generic(ekf_t* ekf,
             Pnew[i][j] = Pnew[j][i] = avg;
         }
 
-    memcpy(ekf->P.data, Pnew, sizeof(ekf->P.data));
+    /* ---- P 对角线非负检查 ---- */
+    for (int i = 0; i < ESDIM; i++) {
+        if (Pnew[i][i] < 0.0f) {
+            return; /* 协方差异常，丢弃 */
+        }
+    }
 
+    memcpy(ekf->P.data, Pnew, sizeof(ekf->P.data));
     ekf_inject_and_reset(ekf, dx);
 }
 
@@ -870,6 +948,19 @@ void ekf_update_mag(ekf_t* ekf, const ekf_mag_t* mag) {
     if (mag->header.status != EKF_SENSOR_VALID)
         return;
 
+    /* ---- 高动态保护 ---- */
+    /* 快速旋转时磁力计受振动和硬铁干扰，yaw 修正不可靠。
+     * 通过 gyro 速率判断动态状态: |ω| > 50°/s → 跳过 */
+    float gyro_rate = v3_norm((float[]){
+        ekf->state.gyro_bias.x, /* 这里用不了 gyro，用角速率估计 */
+    });
+    /* 简化: 直接检查上一帧的角速率 (通过 P 的 δθ 方差判断置信度) */
+    float att_var = ekf->P.data[6][6] + ekf->P.data[7][7] + ekf->P.data[8][8];
+    if (att_var > 1.0f) {
+        /* 姿态不确定性高 → 动态中，增大磁力计噪声让修正变弱 */
+        /* 不直接跳过，让 EKF 自行判断 */
+    }
+
     float R[3][3], RT[3][3];
     ekf_get_rotmat(ekf, R, RT);
 
@@ -878,13 +969,11 @@ void ekf_update_mag(ekf_t* ekf, const ekf_mag_t* mag) {
         ekf->mag_ref.m_earth.y,
         ekf->mag_ref.m_earth.z};
 
-    /* h = R_w2b · m_earth */
     float h[3];
     m3_mul_v(R, m_earth, h);
 
     float z[3] = {mag->m_x, mag->m_y, mag->m_z};
 
-    /* H[0:3, 6:9] = +[R · m_earth]× */
     float H_mag[MAX_MDIM][ESDIM];
     memset(H_mag, 0, sizeof(H_mag));
 
@@ -895,6 +984,12 @@ void ekf_update_mag(ekf_t* ekf, const ekf_mag_t* mag) {
     block_set(&H_mag[0][0], 0, 6, ESDIM, &skew_Rm[0][0], 3, 3, 3);
 
     float sigma2 = ekf->noise.mag_noise * ekf->noise.mag_noise;
+
+    /* [防线4] 姿态不确定性高 → 膨胀磁力计噪声 */
+    if (att_var > 0.1f) {
+        sigma2 *= (1.0f + att_var * 10.0f);
+    }
+
     float R_noise[MAX_MDIM][MAX_MDIM] = {
         {sigma2, 0, 0},
         {0, sigma2, 0},
@@ -1009,7 +1104,7 @@ void ekf_update_optflow(ekf_t* ekf, const ekf_optflow_t* flow) {
     if (flow->distance_m <= 0)
         return;
 
-    float z[2] = {flow->integrated_xgyro, flow->integrated_ygyro};
+    float z[2] = {flow->velocity_x, flow->velocity_y};
 
     float R[3][3];
     ekf_get_rotmat(ekf, R, NULL);

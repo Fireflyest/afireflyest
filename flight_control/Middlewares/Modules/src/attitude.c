@@ -479,20 +479,6 @@ void Attitude_Update(float dt) {
         baro_pkt.temperature = temperature_rx;
         ekf_update_baro(&ekf, &baro_pkt);
     }
-
-    /* ---- 高度安全网 ---- */
-    {
-        float ekf_alt = -ekf.state.pos.z;
-        float baro_alt = altitude_filter.output;
-        float alt_err = ekf_alt - baro_alt;
-
-        if (fabsf(alt_err) > 5.0f) {
-            ekf.state.pos.z = -baro_alt;
-            ekf.state.vel.z = 0.0f;
-        } else if (fabsf(alt_err) > 0.5f) {
-            ekf.state.pos.z += alt_err * 0.01f;
-        }
-    }
 #endif
 }
 
