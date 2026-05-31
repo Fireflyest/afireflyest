@@ -248,6 +248,10 @@ void UI_Cube_Draw(UI_Widget* widget) {
         snprintf(line, sizeof(line), "V:%d.%d", vi, vf);
         GFX_DrawString(0, 30, line, GFX_COLOR_WHITE);
     }
+
+    /* FPS */
+    snprintf(line, sizeof(line), "FPS:%d", FPS_Get());
+    GFX_DrawString(0, 40, line, GFX_COLOR_WHITE);
 }
 
 static float pidErrorHistory[3][128] = {0}; // 0:roll, 1:pitch, 2:yaw

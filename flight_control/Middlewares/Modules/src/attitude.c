@@ -175,8 +175,8 @@ static void attitude_try_align(void) {
      *   右倾 φ: a = [0, g·sinφ, -g·cosφ] → roll = φ
      *   抬头 θ: a = [-g·sinθ, 0, -g·cosθ] → pitch = θ (注意 -ax)
      */
-    float roll = atan2f(ay, -az);
-    float pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
+    float roll = atan2f(-ay, -az);
+    float pitch = atan2f(ax, sqrtf(ay * ay + az * az));
     float yaw = 0.0f;
 
     /* ---- 由磁力计估计 Yaw ---- */
