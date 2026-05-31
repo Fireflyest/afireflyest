@@ -163,7 +163,7 @@ int main() {
     Command_SetLandCallback(Control_Land);
     Command_SetHoverCallback(Control_Hover);
 
-    Window_To(WINDOW_IMU);
+    Window_To(WINDOW_CUBE);
 
     // TaskHandle_t xExampleTaskHandle = NULL;
     // ( void ) xTaskCreate( exampleTask,
