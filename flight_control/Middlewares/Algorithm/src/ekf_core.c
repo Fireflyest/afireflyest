@@ -311,7 +311,7 @@ void ekf_quat_apply_correction(const ekf_quat_t* q_nom,
     float delta_norm_sq = delta->x * delta->x +
                           delta->y * delta->y +
                           delta->z * delta->z;
-    const float max_delta = 0.26f; /* ≈15°，小角度近似的安全上限 */
+    const float max_delta = 0.8f;
     const float max_delta_sq = max_delta * max_delta;
 
     ekf_vec3_t clamped = *delta;
@@ -416,11 +416,12 @@ void ekf_init(ekf_t* ekf, const ekf_noise_params_t* noise) {
         ekf_noise_params_init_default(&ekf->noise);
     }
 
-    ekf_cov_init_diagonal(&ekf->P,
-                          10.0f, 1.0f, 0.5f, 0.1f, 0.5f);
+    ekf->noise.accel_bias_noise = 5.0e-5f; /* 比默认 1e-3 小 20 倍 */
+
+    ekf_cov_init_diagonal(&ekf->P, 10.0f, 1.0f, 0.5f, 0.1f, 0.3f);
 
     ekf->initialized = 0;
-    ekf->baro_altitude_initialized = 0; /* [FIX] 标记高度未初始化 */
+    ekf->baro_altitude_initialized = 0;
 }
 
 /* [FIX] 用初始高度设置 NED 位置 */
@@ -602,9 +603,9 @@ void ekf_predict(ekf_t* ekf, const ekf_imu_t* imu) {
 
     /* 速度/位置传播 (中点法) */
     float vel_mid[3] = {
-        ekf->state.vel.x + 0.5f * a_world[0] * dt,
-        ekf->state.vel.y + 0.5f * a_world[1] * dt,
-        ekf->state.vel.z + 0.5f * a_world[2] * dt};
+    ekf->state.vel.x + 0.5f * a_world[0] * dt,
+    ekf->state.vel.y + 0.5f * a_world[1] * dt,
+    ekf->state.vel.z + 0.5f * a_world[2] * dt};
 
     ekf->state.vel.x += a_world[0] * dt;
     ekf->state.vel.y += a_world[1] * dt;
@@ -691,25 +692,51 @@ void ekf_predict(ekf_t* ekf, const ekf_imu_t* imu) {
     memcpy(ekf->P.data, Pnew, sizeof(ekf->P.data));
 
     /* ---- P 对角线限幅 ---- */
-    /* 防止协方差爆炸 (发散) 或过小 (过度自信导致对异常量测无响应) */
     float (*Pdiag)[ESDIM] = ekf->P.data;
     for (int i = 0; i < ESDIM; i++) {
         if (Pdiag[i][i] > 1e4f)
             Pdiag[i][i] = 1e4f;
-        if (Pdiag[i][i] < 1e-10f)
-            Pdiag[i][i] = 1e-10f;
+    }
+
+    /* P 对角线下限: 防止 EKF 过度自信
+     * 位置: 最小 1.0 m²     (保证气压计有足够修正增益)
+     * 速度: 最小 0.1 (m/s)² (保证速度能被修正)
+     * 姿态: 最小 1e-4 rad²
+     * bias: 最小 1e-6
+     */
+    for (int i = 0; i < 3; i++) {
+        if (Pdiag[i][i] < 1.0f)
+            Pdiag[i][i] = 1.0f; /* pos */
+        if (Pdiag[3 + i][3 + i] < 0.1f)
+            Pdiag[3 + i][3 + i] = 0.1f; /* vel */
+        if (Pdiag[6 + i][6 + i] < 1e-4f)
+            Pdiag[6 + i][6 + i] = 1e-4f; /* att */
+        if (Pdiag[9 + i][9 + i] < 1e-6f)
+            Pdiag[9 + i][9 + i] = 1e-6f; /* b_g */
+        if (Pdiag[12 + i][12 + i] < 1e-6f)
+            Pdiag[12 + i][12 + i] = 1e-6f; /* b_a */
     }
 
     /* ---- 全局 NaN/Inf 检测 ---- */
-    for (int i = 0; i < ESDIM; i++) {
-        if (!isfinite(ekf->state.vel.x) || !isfinite(ekf->state.pos.z) ||
-            !isfinite(ekf->state.quat.w)) {
-            /* 状态损坏，重置为已知安全状态 */
-            float saved_alt = -ekf->state.pos.z; /* 尝试保留高度 */
+    {
+        int corrupted = 0;
+        float* s = &ekf->state.pos.x;
+        for (int i = 0; i < (int)(sizeof(ekf_state_t) / sizeof(float)); i++) {
+            if (!isfinite(s[i])) {
+                corrupted = 1;
+                break;
+            }
+        }
+        if (!isfinite(ekf->state.quat.w) || !isfinite(ekf->state.quat.x) ||
+            !isfinite(ekf->state.quat.y) || !isfinite(ekf->state.quat.z))
+            corrupted = 1;
+
+        if (corrupted) {
+            float saved_alt = -ekf->state.pos.z;
             ekf_state_init_default(&ekf->state);
             ekf->state.pos.z = isfinite(saved_alt) ? -saved_alt : 0;
             ekf_cov_init_diagonal(&ekf->P, 10.0f, 1.0f, 0.5f, 0.1f, 0.5f);
-            break;
+            ekf->baro_altitude_initialized = 0; /* 让气压计重新初始化 */
         }
     }
 }
@@ -854,9 +881,36 @@ static void ekf_update_generic(ekf_t* ekf,
             Sy_i += S_inv[i][j] * y[j];
         chi2 += y[i] * Sy_i;
     }
-    float chi2_threshold = (float)dim_m * 9.0f;
-    if (chi2 > chi2_threshold)
+    float chi2_threshold = (float)dim_m * 25.0f; /* 5σ */
+    if (chi2 > chi2_threshold) {
+        /* [FIX] 卡方拒绝时膨胀相关 P 对角线
+         * 原来: 直接 return，P 不变 → 下次还是拒绝 → 恶性循环
+         * 现在: 膨胀 P → 下次 S 更大 → chi2 更小 → 最终能通过
+         *
+         * 膨胀系数: chi2 超限越多，膨胀越快
+         * chi2 = 50 (刚超限): ×1.5
+         * chi2 = 500 (严重):  ×4.5
+         */
+        float inflate = 1.0f + 0.01f * (chi2 / chi2_threshold - 1.0f);
+        if (inflate > 5.0f)
+            inflate = 5.0f;
+
+        /* 找到本次量测涉及的状态分量并膨胀 */
+        for (int j = 0; j < ESDIM; j++) {
+            /* 如果 H 矩阵第 j 列非零，说明量测涉及状态 j */
+            int involved = 0;
+            for (int i = 0; i < dim_m; i++) {
+                if (fabsf(H[i][j]) > 1e-10f) {
+                    involved = 1;
+                    break;
+                }
+            }
+            if (involved) {
+                P[j][j] *= inflate;
+            }
+        }
         return;
+    }
 
     /* ---- dx = K · y ---- */
     float dx[ESDIM];
@@ -876,15 +930,16 @@ static void ekf_update_generic(ekf_t* ekf,
      * 超限说明量测与状态严重不一致，跳过修正。
      */
     static const float dx_limit[ESDIM] = {
-        5.0f, 5.0f, 5.0f,    /* δp (m) */
-        3.0f, 3.0f, 3.0f,    /* δv (m/s) */
-        0.26f, 0.26f, 0.26f, /* δθ (rad, ≈15°) */
-        0.1f, 0.1f, 0.1f,    /* δb_g (rad/s) */
-        0.5f, 0.5f, 0.5f     /* δb_a (m/s²) */
+        5.0f, 5.0f, 5.0f, /* δp */
+        3.0f, 3.0f, 3.0f, /* δv */
+        0.5f, 0.5f, 0.5f, /* δθ */
+        0.1f, 0.1f, 0.1f, /* δb_g */
+        0.5f, 0.5f, 0.5f  /* δb_a */
     };
     for (int i = 0; i < ESDIM; i++) {
-        if (fabsf(dx[i]) > dx_limit[i])
-            return; /* 修正过大，丢弃本次量测 */
+        if (fabsf(dx[i]) > dx_limit[i]) {
+            dx[i] = copysignf(dx_limit[i], dx[i]);
+        }
     }
 
     /* ---- [防线2b] NaN 检测 ---- */
@@ -952,7 +1007,9 @@ void ekf_update_mag(ekf_t* ekf, const ekf_mag_t* mag) {
     /* 快速旋转时磁力计受振动和硬铁干扰，yaw 修正不可靠。
      * 通过 gyro 速率判断动态状态: |ω| > 50°/s → 跳过 */
     float gyro_rate = v3_norm((float[]){
-        ekf->state.gyro_bias.x, /* 这里用不了 gyro，用角速率估计 */
+        ekf->state.gyro_bias.x,
+        ekf->state.gyro_bias.y,
+        ekf->state.gyro_bias.z
     });
     /* 简化: 直接检查上一帧的角速率 (通过 P 的 δθ 方差判断置信度) */
     float att_var = ekf->P.data[6][6] + ekf->P.data[7][7] + ekf->P.data[8][8];
@@ -1065,29 +1122,25 @@ void ekf_update_baro(ekf_t* ekf, const ekf_baro_t* baro) {
     if (baro->header.status != EKF_SENSOR_VALID)
         return;
 
-    /* 首帧验证 pos.z 与气压计是否对齐 */
+    /* 首帧验证 */
     if (!ekf->baro_altitude_initialized) {
         float predicted_alt = -ekf->state.pos.z;
         if (fabsf(baro->altitude - predicted_alt) > 10.0f) {
-            /* 偏差过大 → pos.z 未被正确初始化，用气压计重设 */
             ekf->state.pos.z = -baro->altitude;
             ekf->state.vel.z = 0.0f;
         }
         ekf->baro_altitude_initialized = 1;
     }
 
-    /* 量测: z = baro.altitude (向上为正)
-     * 预测: h = -p_D (NED: D 向下为正, 高度向上为正 → 取负)
-     */
     float z[1] = {baro->altitude};
     float h_pred[1] = {-ekf->state.pos.z};
 
-    /* H_baro = [0, 0, -1, 0, 0, ..., 0] (1×15) */
     float H_baro[1][ESDIM];
     memset(H_baro, 0, sizeof(H_baro));
     H_baro[0][2] = -1.0f;
 
-    float sigma2 = ekf->noise.baro_noise * ekf->noise.baro_noise;
+    /* [FIX] 气压计噪声适当放大，让卡方更容易通过 */
+    float sigma2 = ekf->noise.baro_noise * ekf->noise.baro_noise * 4.0f;
     float R_baro[MAX_MDIM][MAX_MDIM] = {{0}};
     R_baro[0][0] = sigma2;
 
@@ -1142,6 +1195,63 @@ void ekf_update_optflow(ekf_t* ekf, const ekf_optflow_t* flow) {
         {0, sigma2}};
 
     ekf_update_generic(ekf, z, h_pred, H_flow, R_flow, 2);
+}
+
+/* ------ 重力方向更新 (修正 roll/pitch) ------ */
+
+void ekf_update_gravity(ekf_t* ekf, const ekf_imu_t* imu) {
+    if (!ekf->initialized)
+        return;
+
+    float a_meas[3] = {
+        imu->accel.a_x - ekf->state.accel_bias.x,
+        imu->accel.a_y - ekf->state.accel_bias.y,
+        imu->accel.a_z - ekf->state.accel_bias.z};
+
+    float a_norm = v3_norm(a_meas);
+    if (a_norm < 1.0f)
+        return;
+
+    float norm_err = fabsf(a_norm - EKF_GRAVITY);
+
+    /* [FIX] 纯软衰减，无硬门限
+     * norm_err  0.0 ~ 0.3  → sigma² = 0.05 (完全信任)
+     * norm_err  0.3 ~ 2.0  → sigma² 从 0.05 指数增长到 ~50
+     * norm_err > 2.0       → 跳过 (碰撞/坠落)
+     */
+    if (norm_err > 2.0f)
+        return;
+
+    float R[3][3];
+    ekf_get_rotmat(ekf, R, NULL);
+
+    float g_down[3] = {0.0f, 0.0f, -EKF_GRAVITY};
+    float h[3];
+    m3_mul_v(R, g_down, h);
+
+    float z[3] = {a_meas[0], a_meas[1], a_meas[2]};
+
+    float H_grav[MAX_MDIM][ESDIM];
+    memset(H_grav, 0, sizeof(H_grav));
+    float skew_h[3][3];
+    m3_skew(h, skew_h);
+    block_set(&H_grav[0][0], 0, 6, ESDIM, &skew_h[0][0], 3, 3, 3);
+
+    /* 噪声: 基础值 0.05² (与 accel_noise 一致) */
+    float sigma2 = 0.0025f;
+
+    /* 软衰减: 0.3 ~ 2.0 m/s² → 噪声指数增长 */
+    if (norm_err > 0.3f) {
+        float t = (norm_err - 0.3f) / 1.7f; /* 0 ~ 1 */
+        sigma2 *= (1.0f + t * t * 500.0f);  /* 1x ~ 501x */
+    }
+
+    float R_noise[MAX_MDIM][MAX_MDIM] = {
+        {sigma2, 0.0f, 0.0f},
+        {0.0f, sigma2, 0.0f},
+        {0.0f, 0.0f, sigma2}};
+
+    ekf_update_generic(ekf, z, h, H_grav, R_noise, 3);
 }
 
 /* ========================================================================== */

@@ -32,8 +32,8 @@
 /*  配置                                                                       */
 /* ========================================================================== */
 
-/** @brief 对准所需 IMU 样本数 (400Hz 时约 0.5 秒) */
-#define ALIGN_IMU_SAMPLES 200
+/** @brief 对准所需 IMU 样本数 */
+#define ALIGN_IMU_SAMPLES 20
 
 #define ATTITUDE_EKF_BARO 1
 
@@ -240,6 +240,35 @@ static void attitude_try_align(void) {
     ekf.state.accel_bias.z = 0;
 
     ekf_cov_init_diagonal(&ekf.P, 5.0f, 0.5f, 0.1f, 0.05f, 0.3f);
+
+    /* ---- 对准时估计 accel bias ----
+     *
+     * 已知: 设备静止，a_body = R_w2b·[0,0,-g] + bias
+     *       R_w2b 由加速度均值估计 (roll/pitch)
+     *       所以 bias = a_mean - R_w2b·[0,0,-g]
+     *
+     * 这是代数求解，不是 EKF 迭代，无不可观问题。
+     */
+    {
+        float cp = cosf(pitch), sp = sinf(pitch);
+        float cr = cosf(roll), sr = sinf(roll);
+
+        /* R_w2b · [0, 0, -g] */
+        float a_gravity[3] = {
+            g * sp,
+            -g * cp * sr,
+            -g * cp * cr};
+
+        /* bias = measured - gravity */
+        ekf.state.accel_bias.x = ax - a_gravity[0];
+        ekf.state.accel_bias.y = ay - a_gravity[1];
+        ekf.state.accel_bias.z = az - a_gravity[2];
+
+        /* 精度: 初始协方差小 (已从静止数据求解) */
+        ekf.P.data[12][12] = 0.01f;
+        ekf.P.data[13][13] = 0.01f;
+        ekf.P.data[14][14] = 0.01f;
+    }
 
     ekf.initialized = 1;
     att_state = ATT_RUNNING;
@@ -455,6 +484,7 @@ void Attitude_Update(float dt) {
     imu_pkt.accel.a_z = accel_ms2[2];
 
     ekf_predict(&ekf, &imu_pkt);
+    ekf_update_gravity(&ekf, &imu_pkt);
 
 #if ATTITUDE_USE_MAG
     /* ---- 磁力计更新 (修正 yaw) ---- */
