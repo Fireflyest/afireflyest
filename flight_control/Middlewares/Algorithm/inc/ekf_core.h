@@ -145,6 +145,13 @@ void ekf_update_baro(ekf_t* ekf, const ekf_baro_t* baro);
  */
 void ekf_update_optflow(ekf_t* ekf, const ekf_optflow_t* flow);
 
+/**
+ * @brief 重力方向观测 (加速度计量测更新)
+ * @param ekf  EKF 实例
+ * @param imu  IMU 数据包 (与 ekf_predict 使用同一份)
+ */
+void ekf_update_gravity(ekf_t* ekf, const ekf_imu_t* imu);
+
 /* ========================================================================== */
 /*  状态读取                                                                   */
 /* ========================================================================== */
