@@ -16,15 +16,19 @@
  *  │    ─────────────  ─────────  ──────────  ──────────  ────────── │
  *  │    油门 (↑)         +1          +1          +1          +1       │
  *  │    Roll (右倾+)     +1          +1          -1          -1       │
- *  │    Pitch (低头+)    +1          -1          +1          -1       │
- *  │    Yaw   (CW+)      -1          +1          +1          -1       │
+ *  │    Pitch (上仰+)    -1          +1          -1          +1       │
+ *  │    Yaw  (CW+)       -1          +1          +1          -1       │
  *  └───────────────────────────────────────────────────────────────┘
  *
  *  推导:
- *    Roll  正力矩: 需要左侧电机推力更大 → M1+, M2+, M3-, M4-
- *    Pitch 正力矩: 需要后方电机推力更大 → M1+, M2-, M3+, M4-
- *    Yaw   正力矩: 需要增大 CCW 电机转速 (CW 反扭矩更大 → 机身 CW)
- *                   → M1(CW)-, M2(CCW)+, M3(CCW)+, M4(CW)-
+ *    Roll  正力矩: 右翼下沉 → 左侧电机推力更大 → M1+, M2+, M3-, M4-
+ *    Pitch 正力矩: 机头上抬 → 前方电机推力更大 → M2+, M4+, M1-, M3-
+ *    Yaw   正力矩: 机身 CW → CCW 电机反扭矩更大 → M2+, M3+, M1-, M4-
+ *
+ *  "正指令" 的物理含义:
+ *      Roll  正 = 施加右倾力矩   → 右翼下沉
+ *      Pitch 正 = 施加上仰力矩   → 机头上抬
+ *      Yaw   正 = 施加 CW 力矩  → 机头顺时针偏转 (俯视)
  *
  * ============================================================================
  *  误差四元数计算
@@ -387,12 +391,12 @@ void ControlAttitude_Loop(void) {
     /* ── 6. 姿态目标构建 ─────────────────────────── */
     /*
      * 叠加平移倾斜:
-     *   前进 → 机头下沉 → Pitch 增大 (FRD 正)
-     *   右移 → 右翼下沉 → Roll  增大 (FRD 正)
+     *   前进 → 机头下沉 → Pitch 减小 (FRD 正 pitch = 上仰, 前进需要负 pitch)
+     *   右移 → 右翼下沉 → Roll  增大 (FRD 正 roll = 右倾)
      */
     float effRoll = targetRoll + moveRight * TILT_ANGLE_LIMIT;
-    float effPitch = targetPitch + moveForward * TILT_ANGLE_LIMIT;
-    float effYaw = targetYaw; /* 保持当前目标航向 */
+    float effPitch = targetPitch - moveForward * TILT_ANGLE_LIMIT;
+    float effYaw = targetYaw;
 
     /* 目标四元数 (rad) */
     quat_from_euler(targetQuat,
@@ -431,7 +435,7 @@ void ControlAttitude_Loop(void) {
     float errYaw = errYaw_rad * RAD2DEG;
 
     /* 万向锁保护: 大俯仰角时 Yaw/Roll 耦合, 禁用 Yaw 修正 */
-    float sinPitch = 2.0f * (curQuat[0] * curQuat[2] + curQuat[1] * curQuat[3]);
+    float sinPitch = 2.0f * (curQuat[0] * curQuat[2] - curQuat[1] * curQuat[3]);
     if (fabsf(sinPitch) > GIMBAL_LOCK_THRESH) {
         errYaw = 0.0f;
     }
@@ -506,19 +510,19 @@ void ControlMotor_Loop(void) {
      *              M1(RL,CW)  M2(FL,CCW)  M3(RR,CCW)  M4(FR,CW)
      * 油门 (↑)      +1          +1          +1          +1
      * Roll  (右倾+) +1          +1          -1          -1
-     * Pitch (低头+) +1          -1          +1          -1
+     * Pitch (上仰+) -1          +1          -1          +1
      * Yaw   (CW+)   -1          +1          +1          -1
      *
-     * 注: PID 输出的控制量符号含义:
-     *   rollCtrl  > 0 → 需要正 Roll  力矩 (右翼下沉方向)
-     *   pitchCtrl > 0 → 需要正 Pitch 力矩 (机头下沉方向)
-     *   yawCtrl   > 0 → 需要正 Yaw   力矩 (CW 方向)
+     * 推导:
+     *   Roll  正力矩: 右翼下沉 → 左侧电机推力更大 → M1+, M2+, M3-, M4-
+     *   Pitch 正力矩: 机头上抬 → 前方电机推力更大 → M2+, M4+, M1-, M3-
+     *   Yaw   正力矩: 机身 CW → CCW 电机推力更大 → M2+, M3+, M1-, M4-
      */
     float m[MOTOR_COUNT];
-    m[MOTOR_RL] = throttle + rollCtrl + pitchCtrl - yawCtrl;
-    m[MOTOR_FL] = throttle + rollCtrl - pitchCtrl + yawCtrl;
-    m[MOTOR_RR] = throttle - rollCtrl + pitchCtrl + yawCtrl;
-    m[MOTOR_FR] = throttle - rollCtrl - pitchCtrl - yawCtrl;
+    m[MOTOR_RL] = throttle + rollCtrl - pitchCtrl - yawCtrl;
+    m[MOTOR_FL] = throttle + rollCtrl + pitchCtrl + yawCtrl;
+    m[MOTOR_RR] = throttle - rollCtrl - pitchCtrl + yawCtrl;
+    m[MOTOR_FR] = throttle - rollCtrl + pitchCtrl - yawCtrl;
 
     /* ── 5. 输出限幅 ──────────────────────────────── */
     /* 比例限幅: 保持差动指令比例, 避免截断导致姿态失控 */
