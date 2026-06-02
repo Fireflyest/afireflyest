@@ -105,11 +105,11 @@ extern "C" {
  * @name 传感器典型采样率
  * @{
  */
-#define SENSOR_RATE_IMU_HZ 400    /**< IMU (陀螺仪+加速度计) 400 Hz  */
-#define SENSOR_RATE_MAG_HZ 100    /**< 磁力计 100 Hz                 */
-#define SENSOR_RATE_BARO_HZ 50    /**< 气压计 50 Hz                  */
-#define SENSOR_RATE_GPS_HZ 10     /**< GPS 10 Hz                     */
-#define SENSOR_RATE_OPTFLOW_HZ 50 /**< 光流 50 Hz                    */
+#define EKF_SENSOR_RATE_IMU_HZ 400 /**< IMU (陀螺仪+加速度计) 400 Hz  */
+#define EKF_SENSOR_RATE_MAG_HZ 100 /**< 磁力计 100 Hz                 */
+#define EKF_SENSOR_RATE_BARO_HZ 50 /**< 气压计 50 Hz                  */
+#define EKF_SENSOR_RATE_GPS_HZ 10  /**< GPS 10 Hz                     */
+#define EKF_SENSOR_RATE_OPTFLOW_HZ 50 /**< 光流 50 Hz                    */
 /** @} */
 
 /* ========================================================================== */
@@ -160,7 +160,6 @@ typedef struct {
  *   - 采样率通常为 400 Hz (与加速度计同步)
  */
 typedef struct {
-    ekf_sensor_header_t header; /**< 公共头部: 时间戳 + 有效性   */
     float omega_x;              /**< X 轴角速度 (rad/s), roll rate  */
     float omega_y;              /**< Y 轴角速度 (rad/s), pitch rate */
     float omega_z;              /**< Z 轴角速度 (rad/s), yaw rate   */
@@ -203,7 +202,6 @@ typedef struct {
  *   高速机动时加速度计不可靠，仅用于修正 gyro bias。
  */
 typedef struct {
-    ekf_sensor_header_t header; /**< 公共头部: 时间戳 + 有效性   */
     float a_x;                  /**< X 轴加速度 (m/s²), 机头前方  */
     float a_y;                  /**< Y 轴加速度 (m/s²), 右侧      */
     float a_z;                  /**< Z 轴加速度 (m/s²), 机腹下方   */
@@ -217,8 +215,7 @@ typedef struct {
  *
  * 使用说明:
  *   ekf_predict() 读取 header.timestamp_us 判断时间步长。
- *   gyro 和 accel 内部的 header 字段为预留，当前不参与逻辑，
- *   调用方可选择不填充以简化赋值。
+ *   gyro 和 accel 共用外层 header 的时间戳，无需各自维护。
  */
 typedef struct {
     ekf_sensor_header_t header; /**< 公共头部 (陀螺仪+加速度计共用) */
@@ -311,7 +308,7 @@ typedef struct {
  *   D (m) = -(alt - alt_ref)                         (地向，高度取负)
  *
  * GPS 数据标记:
- *   fix_type: 0=无定位, 2=2D, 3=3D, 4=DGPS, 5=RTK Float, 6=RTK Fix
+ *   fix_type: 0=无定位, 1=DR, 2=2D, 3=3D, 4=DGPS, 5=RTK Float, 6=RTK Fix
  *   num_sats: 可见卫星数，建议 ≥ 6 时使用
  *   hdop:     水平精度因子，越小越好
  *

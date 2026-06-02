@@ -2,270 +2,497 @@
  * @file ekf_core.c
  * @brief EKF 四旋翼无人机 — 完整实现
  *
- * 本文件实现:
- *   - ekf_types.h   中声明的所有工具函数
- *   - ekf_sensors.h  中声明的传感器辅助函数
- *   - ekf_core.h     中声明的 EKF 核心算法
- *
- * 编译依赖: ekf_types.h, ekf_sensors.h, ekf_core.h, <math.h>, <string.h>
- *
- * 修正记录:
- *   - [FIX] 气压计首次量测初始化: 用首帧 baro 读数初始化 pos.z，
- *           避免 MSL 海拔与 NED 零初始值的巨大偏差导致卡方门限拒绝所有修正
- *   - [FIX] 传递 init_altitude 到 EKF
+ * Error-State EKF (ESEKF)，15 维误差状态
+ * 所有数学推参见 ekf_types.h / ekf_sensors.h 头注释
  */
 
 #include "ekf_core.h"
-#include <float.h>
 #include <math.h>
 #include <string.h>
 
 /* ========================================================================== */
-/*  Section 0: 内部宏与常量                                                    */
+/*  内部工具函数                                                               */
 /* ========================================================================== */
 
-/** @brief 误差状态维度 (方便书写) */
-#define ESDIM EKF_ERROR_STATE_DIM /* 15 */
-
-/** @brief 最大量测维度 (所有传感器量测 ≤ 3 维) */
-#define MAX_MDIM 3
-
-/** @brief 小量，防止除零 */
-#define EPS_F 1e-12f
-
-/* ========================================================================== */
-/*  Section 1: 内部数学工具                                                    */
-/* ========================================================================== */
-
-/* --- 3 维向量 --- */
-
-/** @brief c = a × b (叉积) */
-static inline void v3_cross(const float a[3], const float b[3], float c[3]) {
-    c[0] = a[1] * b[2] - a[2] * b[1];
-    c[1] = a[2] * b[0] - a[0] * b[2];
-    c[2] = a[0] * b[1] - a[1] * b[0];
-}
-
-/** @brief out = a - b */
-static inline void v3_sub(const float a[3], const float b[3], float out[3]) {
-    out[0] = a[0] - b[0];
-    out[1] = a[1] - b[1];
-    out[2] = a[2] - b[2];
-}
-
-/** @brief out = a + b */
-static inline void v3_add(const float a[3], const float b[3], float out[3]) {
-    out[0] = a[0] + b[0];
-    out[1] = a[1] + b[1];
-    out[2] = a[2] + b[2];
-}
-
-/** @brief ||v|| */
-static inline float v3_norm(const float v[3]) {
-    return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-}
-
-/** @brief out = scale * v */
-static inline void v3_scale(float s, const float v[3], float out[3]) {
-    out[0] = s * v[0];
-    out[1] = s * v[1];
-    out[2] = s * v[2];
-}
-
-/* --- 3×3 矩阵 --- */
-
-/** @brief S = [v]× (反对称矩阵) */
-static inline void m3_skew(const float v[3], float S[3][3]) {
-    S[0][0] = 0;
+/** @brief 3×3 反对称矩阵 S = [v×] */
+static void skew_sym(const float v[3], float S[3][3]) {
+    S[0][0] = 0.0f;
     S[0][1] = -v[2];
     S[0][2] = v[1];
     S[1][0] = v[2];
-    S[1][1] = 0;
+    S[1][1] = 0.0f;
     S[1][2] = -v[0];
     S[2][0] = -v[1];
     S[2][1] = v[0];
-    S[2][2] = 0;
+    S[2][2] = 0.0f;
 }
 
-/** @brief c = R * v */
-static inline void m3_mul_v(const float R[3][3], const float v[3], float c[3]) {
-    c[0] = R[0][0] * v[0] + R[0][1] * v[1] + R[0][2] * v[2];
-    c[1] = R[1][0] * v[0] + R[1][1] * v[1] + R[1][2] * v[2];
-    c[2] = R[2][0] * v[0] + R[2][1] * v[1] + R[2][2] * v[2];
-}
-
-/** @brief C = A * B */
-static inline void m3_mul(const float A[3][3], const float B[3][3], float C[3][3]) {
+/** @brief C = A × B (3×3) */
+static void m3_mul(const float A[3][3], const float B[3][3], float C[3][3]) {
     for (int i = 0; i < 3; i++)
         for (int j = 0; j < 3; j++)
             C[i][j] = A[i][0] * B[0][j] + A[i][1] * B[1][j] + A[i][2] * B[2][j];
 }
 
-/** @brief Out = A^T */
-static inline void m3_trans(const float A[3][3], float Out[3][3]) {
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++)
-            Out[i][j] = A[j][i];
+/** @brief out = A × v (3×3 × 3×1) */
+static void m3_vec(const float A[3][3], const float v[3], float out[3]) {
+    out[0] = A[0][0] * v[0] + A[0][1] * v[1] + A[0][2] * v[2];
+    out[1] = A[1][0] * v[0] + A[1][1] * v[1] + A[1][2] * v[2];
+    out[2] = A[2][0] * v[0] + A[2][1] * v[1] + A[2][2] * v[2];
 }
 
-/** @brief C = A^T * B */
-static inline void m3t_mul_m3(const float A[3][3], const float B[3][3], float C[3][3]) {
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++)
-            C[i][j] = A[0][i] * B[0][j] + A[1][i] * B[1][j] + A[2][i] * B[2][j];
+/** @brief 3×3 矩阵求逆，返回 0 成功 / -1 奇异 */
+static int m3_inv(const float A[3][3], float Ai[3][3]) {
+    float det = A[0][0] * (A[1][1] * A[2][2] - A[1][2] * A[2][1]) - A[0][1] * (A[1][0] * A[2][2] - A[1][2] * A[2][0]) + A[0][2] * (A[1][0] * A[2][1] - A[1][1] * A[2][0]);
+    if (fabsf(det) < 1e-15f)
+        return -1;
+    float id = 1.0f / det;
+    Ai[0][0] = (A[1][1] * A[2][2] - A[1][2] * A[2][1]) * id;
+    Ai[0][1] = -(A[0][1] * A[2][2] - A[0][2] * A[2][1]) * id;
+    Ai[0][2] = (A[0][1] * A[1][2] - A[0][2] * A[1][1]) * id;
+    Ai[1][0] = -(A[1][0] * A[2][2] - A[1][2] * A[2][0]) * id;
+    Ai[1][1] = (A[0][0] * A[2][2] - A[0][2] * A[2][0]) * id;
+    Ai[1][2] = -(A[0][0] * A[1][2] - A[0][2] * A[1][0]) * id;
+    Ai[2][0] = (A[1][0] * A[2][1] - A[1][1] * A[2][0]) * id;
+    Ai[2][1] = -(A[0][0] * A[2][1] - A[0][1] * A[2][0]) * id;
+    Ai[2][2] = (A[0][0] * A[1][1] - A[0][1] * A[1][0]) * id;
+    return 0;
 }
 
-/** @brief C = A * B^T */
-static inline void m3_mul_m3t(const float A[3][3], const float B[3][3], float C[3][3]) {
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++)
-            C[i][j] = A[i][0] * B[j][0] + A[i][1] * B[j][1] + A[i][2] * B[j][2];
-}
-
-/** @brief 3×3 单位阵 */
-static inline void m3_identity(float M[3][3]) {
-    memset(M, 0, 9 * sizeof(float));
-    M[0][0] = M[1][1] = M[2][2] = 1.0f;
-}
-
-/** @brief 3×3 零阵 */
-static inline void m3_zero(float M[3][3]) {
-    memset(M, 0, 9 * sizeof(float));
-}
-
-/* --- 3×3 求逆 (伴随矩阵法) --- */
-
-/**
- * @brief Out = inv(A), 3×3 矩阵求逆
- * @return 行列式绝对值 (可用于判断奇异性)
- */
-static float m3_inv(const float A[3][3], float Out[3][3]) {
-    float c00 = A[1][1] * A[2][2] - A[1][2] * A[2][1];
-    float c01 = A[1][2] * A[2][0] - A[1][0] * A[2][2];
-    float c02 = A[1][0] * A[2][1] - A[1][1] * A[2][0];
-    float det = A[0][0] * c00 + A[0][1] * c01 + A[0][2] * c02;
-
-    float inv_det = 1.0f / det;
-    Out[0][0] = c00 * inv_det;
-    Out[0][1] = (A[0][2] * A[2][1] - A[0][1] * A[2][2]) * inv_det;
-    Out[0][2] = (A[0][1] * A[1][2] - A[0][2] * A[1][1]) * inv_det;
-    Out[1][0] = c01 * inv_det;
-    Out[1][1] = (A[0][0] * A[2][2] - A[0][2] * A[2][0]) * inv_det;
-    Out[1][2] = (A[0][2] * A[1][0] - A[0][0] * A[1][2]) * inv_det;
-    Out[2][0] = c02 * inv_det;
-    Out[2][1] = (A[0][1] * A[2][0] - A[0][0] * A[2][1]) * inv_det;
-    Out[2][2] = (A[0][0] * A[1][1] - A[0][1] * A[1][0]) * inv_det;
-
-    return fabsf(det);
-}
-
-/* --- 15×15 矩阵操作 (在 float[ESDIM][ESDIM] 上) --- */
-
-static void m15_zero(float M[ESDIM][ESDIM]) {
-    memset(M, 0, ESDIM * ESDIM * sizeof(float));
-}
-
-static void m15_identity(float M[ESDIM][ESDIM]) {
-    m15_zero(M);
-    for (int i = 0; i < ESDIM; i++)
-        M[i][i] = 1.0f;
-}
-
-/** @brief C = A + B (15×15) */
-static void m15_add(const float A[ESDIM][ESDIM],
-                    const float B[ESDIM][ESDIM],
-                    float C[ESDIM][ESDIM]) {
-    for (int i = 0; i < ESDIM; i++)
-        for (int j = 0; j < ESDIM; j++)
-            C[i][j] = A[i][j] + B[i][j];
-}
-
-/** @brief C = A * B (15×15) */
-static void m15_mul(const float A[ESDIM][ESDIM],
-                    const float B[ESDIM][ESDIM],
-                    float C[ESDIM][ESDIM]) {
-    for (int i = 0; i < ESDIM; i++) {
-        for (int j = 0; j < ESDIM; j++) {
-            float s = 0;
-            for (int k = 0; k < ESDIM; k++)
-                s += A[i][k] * B[k][j];
-            C[i][j] = s;
-        }
-    }
-}
-
-/** @brief B = A^T (15×15) */
-static void m15_trans(const float A[ESDIM][ESDIM], float B[ESDIM][ESDIM]) {
-    for (int i = 0; i < ESDIM; i++)
-        for (int j = 0; j < ESDIM; j++)
-            B[i][j] = A[j][i];
-}
-
-/**
- * @brief 矩阵块赋值: Out[r0:r0+nr, c0:c0+nc] = In[nr][nc]
- */
-static void block_set(float* Out, int r0, int c0, int ld_out, const float* In, int nr, int nc, int ld_in) {
-    for (int i = 0; i < nr; i++)
-        for (int j = 0; j < nc; j++)
-            Out[(r0 + i) * ld_out + (c0 + j)] = In[i * ld_in + j];
-}
-
-/** @brief 块读取: out[nr][nc] = M[r0:r0+nr, c0:c0+nc] */
-static void block_get(const float* M, int r0, int c0, int ld_m, float* out, int nr, int nc, int ld_out) {
-    for (int i = 0; i < nr; i++)
-        for (int j = 0; j < nc; j++)
-            out[i * ld_out + j] = M[(r0 + i) * ld_m + (c0 + j)];
+/** @brief 2×2 对称矩阵求逆 */
+static int m2_inv_sym(const float S[2][2], float Si[2][2]) {
+    float det = S[0][0] * S[1][1] - S[0][1] * S[1][0];
+    if (fabsf(det) < 1e-15f)
+        return -1;
+    float id = 1.0f / det;
+    Si[0][0] = S[1][1] * id;
+    Si[0][1] = -S[0][1] * id;
+    Si[1][0] = -S[1][0] * id;
+    Si[1][1] = S[0][0] * id;
+    return 0;
 }
 
 /* ========================================================================== */
-/*  Section 2: ekf_types.h 工具函数实现                                        */
+/*  协方差传播（稀疏 Φ·P·Φᵀ）                                                  */
+/* ========================================================================== */
+
+/**
+ * 预计算 Φ 的非平凡块并完成 P ← Φ·P·Φᵀ + Q_d
+ *
+ * Φ = I₁₅ + F·Δt，非零块:
+ *   Φ[0][1] = Δt·I          (位置←速度)
+ *   Φ[1][2] = -Rᵀ[a×]·Δt   (速度←姿态，加速度耦合)
+ *   Φ[1][4] = -Rᵀ·Δt        (速度←加速度计bias)
+ *   Φ[2][2] = I - [ω×]·Δt   (姿态自转)
+ *   Φ[2][3] = -I·Δt          (姿态←陀螺仪bias)
+ *   对角其余 = I
+ *
+ * Q_d = diag(0, σ²_a·Δt·I, σ²_g·Δt·I, σ²_bg·Δt·I, σ²_ba·Δt·I)
+ */
+static void propagate_covariance(ekf_t* ekf,
+                                 const ekf_mat3_t* R,
+                                 float ax,
+                                 float ay,
+                                 float az,
+                                 float wx,
+                                 float wy,
+                                 float wz,
+                                 float dt) {
+    const ekf_noise_params_t* n = &ekf->noise;
+    float (*P)[EKF_ERROR_STATE_DIM] = ekf->P.data;
+
+    /* ---------- 预计算 Φ 的特殊块 ---------- */
+
+    /* [a×] */
+    float Sa[3][3];
+    skew_sym((float[3]){ax, ay, az}, Sa);
+
+    /* Rᵀ */
+    float Rt[3][3];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            Rt[i][j] = R->m[j][i];
+
+    /* Φ12 = -Rᵀ·[a×]·Δt */
+    float tmp33[3][3], Phi12[3][3];
+    m3_mul(Rt, Sa, tmp33);
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            Phi12[i][j] = -tmp33[i][j] * dt;
+
+    /* Φ14 = -Rᵀ·Δt */
+    float Phi14[3][3];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            Phi14[i][j] = -Rt[i][j] * dt;
+
+    /* Φ22 = I - [ω×]·Δt */
+    float Phi22[3][3];
+    Phi22[0][0] = 1.0f;
+    Phi22[0][1] = wz * dt;
+    Phi22[0][2] = -wy * dt;
+    Phi22[1][0] = -wz * dt;
+    Phi22[1][1] = 1.0f;
+    Phi22[1][2] = wx * dt;
+    Phi22[2][0] = wy * dt;
+    Phi22[2][1] = -wx * dt;
+    Phi22[2][2] = 1.0f;
+
+    /* Φ23 = -I·Δt */
+
+    /* ---------- M = Φ·P (利用稀疏性逐行算) ---------- */
+    /* 分 5×5 块 (每块 3×3)，行索引 bi=0..4, 列索引 bj=0..4 */
+    /* Row 0: M₀ⱼ = P₀ⱼ + Δt·P₁ⱼ                                   */
+    /* Row 1: M₁ⱼ = P₁ⱼ + Φ12·P₂ⱼ + Φ14·P₄ⱼ                       */
+    /* Row 2: M₂ⱼ = Φ22·P₂ⱼ - Δt·P₃ⱼ                               */
+    /* Row 3: M₃ⱼ = P₃ⱼ                                              */
+    /* Row 4: M₄ⱼ = P₄ⱼ                                              */
+
+    /* 为节省栈空间，先算 M 再直接算 P_new = M·Φᵀ + Q_d */
+    float M[15][15];
+
+    for (int bj = 0; bj < 5; bj++) {
+        int cb = bj * 3;
+
+        /* Row 0 */
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++)
+                M[r][cb + c] = P[r][cb + c] + dt * P[3 + r][cb + c];
+
+        /* Row 1 */
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++) {
+                float s = P[3 + r][cb + c];
+                for (int k = 0; k < 3; k++)
+                    s += Phi12[r][k] * P[6 + k][cb + c];
+                for (int k = 0; k < 3; k++)
+                    s += Phi14[r][k] * P[12 + k][cb + c];
+                M[3 + r][cb + c] = s;
+            }
+
+        /* Row 2 */
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++) {
+                float s = -dt * P[9 + r][cb + c];
+                for (int k = 0; k < 3; k++)
+                    s += Phi22[r][k] * P[6 + k][cb + c];
+                M[6 + r][cb + c] = s;
+            }
+
+        /* Row 3, 4 — 直接拷贝 */
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++) {
+                M[9 + r][cb + c] = P[9 + r][cb + c];
+                M[12 + r][cb + c] = P[12 + r][cb + c];
+            }
+    }
+
+/* ---------- P_new = M·Φᵀ + Q_d (利用对称性只算上三角) ---------- */
+/* Φᵀ 的非零块 (列视角):                                             */
+/*   Col 0: Φᵀ[0][0]=I                                             */
+/*   Col 1: Φᵀ[1][0]=Δt·I, Φᵀ[1][1]=I                             */
+/*   Col 2: Φᵀ[2][1]=Φ12ᵀ, Φᵀ[2][2]=Φ22ᵀ, Φᵀ[2][3]=-Δt·I       */
+/*   Col 3: Φᵀ[3][2]=-Δt·I, Φᵀ[3][3]=I                            */
+/*   Col 4: Φᵀ[4][1]=Φ14ᵀ, Φᵀ[4][4]=I                             */
+
+/* 直接计算每个输出块，避免显式构造 Φᵀ */
+#define BLK(BI, BJ, R, C) ((BI) * 3 + (R))[(BJ) * 3 + (C)]
+
+    for (int bi = 0; bi < 5; bi++) {
+        for (int bj = bi; bj < 5; bj++) {
+            int ri = bi * 3, rj = bj * 3;
+
+            for (int r = (bi == bj ? 0 : 0); r < 3; r++) {
+                int c_start = (bi == bj) ? r : 0;
+                for (int c = c_start; c < 3; c++) {
+                    float s = 0.0f;
+
+                    /* P_new[bi][bj] = Σ_k M[bi*3+r][k] · Φᵀ[k][bj*3+c] */
+                    /* 即 M 的第 (bi,r) 行点乘 Φᵀ 的第 (bj,c) 列 */
+
+                    /* k in block 0: Φᵀ[0*3+k][bj*3+c] = Φ[bj*3+c][0*3+k]^T */
+                    /*   Φ[0][0]=I → Φᵀ[0][0]=I                           */
+                    /*   Φ[1][0]=0 → Φᵀ[0][1]=0                           */
+                    /*   Φ[2][0]=0 → Φᵀ[0][2]=0                           */
+                    /*   Φ[3][0]=0 → Φᵀ[0][3]=0                           */
+                    /*   Φ[4][0]=0 → Φᵀ[0][4]=0                           */
+                    if (bj == 0) {
+                        s += M[ri + r][rj + c]; /* I block */
+                    }
+
+                    /* k in block 1: Φᵀ[1*3+k][bj*3+c] */
+                    /*   Φ[0][1]=ΔtI → Φᵀ[1][0]=ΔtI  (bj==0) */
+                    /*   Φ[1][1]=I   → Φᵀ[1][1]=I    (bj==1) */
+                    /*   Φ[2][1]=Φ12 → Φᵀ[1][2]=Φ12ᵀ (bj==2) */
+                    /*   Φ[3][1]=0                    (bj==3) */
+                    /*   Φ[4][1]=Φ14 → Φᵀ[1][4]=Φ14ᵀ (bj==4) */
+                    if (bj == 0) {
+                        s += M[ri + r][3 + c] * dt;
+                    } else if (bj == 1) {
+                        s += M[ri + r][3 + c];
+                    }
+
+                    /* k in block 2: Φᵀ[2*3+k][bj*3+c] */
+                    /*   Φ[0][2]=0                       (bj==0) */
+                    /*   Φ[1][2]=Φ12 → Φᵀ[2][1]=Φ12ᵀ    (bj==1) */
+                    /*   Φ[2][2]=Φ22 → Φᵀ[2][2]=Φ22ᵀ    (bj==2) */
+                    /*   Φ[3][2]=-ΔtI → Φᵀ[2][3]=-ΔtI   (bj==3) */
+                    /*   Φ[4][2]=0                       (bj==4) */
+                    if (bj == 1) {
+                        for (int k = 0; k < 3; k++)
+                            s += M[ri + r][6 + k] * Phi12[c][k];
+                    } else if (bj == 2) {
+                        for (int k = 0; k < 3; k++)
+                            s += M[ri + r][6 + k] * Phi22[c][k];
+                    }
+
+                    /* k in block 3: Φᵀ[3*3+k][bj*3+c] */
+                    /*   Φ[2][3]=-ΔtI → Φᵀ[3][2]=-ΔtI  (bj==2) */
+                    /*   Φ[3][3]=I → Φᵀ[3][3]=I         (bj==3) */
+                    /*   Φ[4][3]=0                       */
+                    if (bj == 2) {
+                        s += -dt * M[ri + r][9 + c];
+                    } else if (bj == 3) {
+                        s += M[ri + r][9 + c];
+                    }
+
+                    /* k in block 4: Φᵀ[4*3+k][bj*3+c] */
+                    /*   Φ[1][4]=Φ14 → Φᵀ[4][1]=Φ14ᵀ    (bj==1) */
+                    /*   Φ[4][4]=I → Φᵀ[4][4]=I         (bj==4) */
+                    if (bj == 1) {
+                        for (int k = 0; k < 3; k++)
+                            s += M[ri + r][12 + k] * Phi14[c][k];
+                    } else if (bj == 4) {
+                        s += M[ri + r][12 + c];
+                    }
+
+                    /* Q_d (对角块，对角线元素) */
+                    if (bi == bj && r == c) {
+                        switch (bi) {
+                        case 1:
+                            s += n->accel_noise * n->accel_noise * dt;
+                            break;
+                        case 2:
+                            s += n->gyro_noise * n->gyro_noise * dt;
+                            break;
+                        case 3:
+                            s += n->gyro_bias_noise * n->gyro_bias_noise * dt;
+                            break;
+                        case 4:
+                            s += n->accel_bias_noise * n->accel_bias_noise * dt;
+                            break;
+                        default:
+                            break;
+                        }
+                    }
+
+                    P[ri + r][rj + c] = s;
+                    if (bi != bj || r != c)
+                        P[rj + c][ri + r] = s; /* 对称 */
+                }
+            }
+        }
+    }
+
+#undef BLK
+}
+
+/* ========================================================================== */
+/*  通用 Kalman 更新 (Joseph 形式 + 野值门控)                                  */
+/* ========================================================================== */
+
+/**
+ * @param n  观测维度 (1, 2, 3)
+ * @param y  新息向量 [n]
+ * @param H  观测矩阵 [n × 15] 行主序
+ * @param R  量测噪声 [n × n] 对称，行主序
+ */
+static void ekf_do_update(ekf_t* ekf, int n, const float* y, const float* H, const float* R) {
+    if (!ekf->initialized)
+        return;
+
+    float (*P)[EKF_ERROR_STATE_DIM] = ekf->P.data;
+    const int N = EKF_ERROR_STATE_DIM; /* 15 */
+
+    /* ---- Step 1: HP = H · P  (n × 15) ---- */
+    float HP[3][15];
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < N; j++) {
+            float s = 0.0f;
+            for (int k = 0; k < N; k++)
+                s += H[i * N + k] * P[k][j];
+            HP[i][j] = s;
+        }
+
+    /* ---- Step 2: S = H·P·Hᵀ + R  (n × n, 对称) ---- */
+    float S[3][3];
+    for (int i = 0; i < n; i++)
+        for (int j = i; j < n; j++) {
+            float s = R[i * n + j];
+            for (int k = 0; k < N; k++)
+                s += HP[i][k] * H[j * N + k];
+            S[i][j] = s;
+            if (j != i)
+                S[j][i] = s;
+        }
+
+    /* ---- Step 3: K = P·Hᵀ·S⁻¹  (15 × n) ---- */
+    float Si[3][3];
+    int singular = 0;
+    if (n == 1) {
+        if (fabsf(S[0][0]) < 1e-15f)
+            singular = 1;
+        else
+            Si[0][0] = 1.0f / S[0][0];
+    } else if (n == 2) {
+        float S2[2][2] = {{S[0][0], S[0][1]},
+                          {S[1][0], S[1][1]}};
+        float Si2[2][2];
+        singular = m2_inv_sym(S2, Si2);
+        if (!singular) {
+            Si[0][0] = Si2[0][0];
+            Si[0][1] = Si2[0][1];
+            Si[1][0] = Si2[1][0];
+            Si[1][1] = Si2[1][1];
+        }
+    } else {
+        singular = m3_inv(S, Si);
+    }
+    if (singular)
+        return;
+
+    /* PHᵀ 的第 (j,i) 元素 = P[j]ᵀ·H[i]ᵀ = HP[i][j] (P 对称) */
+    float K[15][3];
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < n; j++) {
+            float s = 0.0f;
+            for (int k = 0; k < n; k++)
+                s += HP[k][i] * Si[k][j]; /* PHᵀ[i][k] = HP[k][i] */
+            K[i][j] = s;
+        }
+
+    /* ---- Step 4: 野值门控 (Mahalanobis 距离) ---- */
+    /* χ² 阈值: 99% 置信 */
+    static const float chi2_thresh[] = {0.0f, 6.635f, 9.210f, 11.345f};
+    float d2 = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float Syi = 0.0f;
+        for (int j = 0; j < n; j++)
+            Syi += S[i][j] * y[j];
+        d2 += y[i] * Syi;
+    }
+    if (d2 > chi2_thresh[n])
+        return;
+
+    /* ---- Step 5: 误差状态 δx = K · y ---- */
+    float dx[15];
+    for (int i = 0; i < N; i++) {
+        float s = 0.0f;
+        for (int j = 0; j < n; j++)
+            s += K[i][j] * y[j];
+        dx[i] = s;
+    }
+
+    /* ---- Step 6: 修正标称状态 ---- */
+    ekf->state.pos.x += dx[0];
+    ekf->state.pos.y += dx[1];
+    ekf->state.pos.z += dx[2];
+    ekf->state.vel.x += dx[3];
+    ekf->state.vel.y += dx[4];
+    ekf->state.vel.z += dx[5];
+
+    ekf_vec3_t dtheta = {dx[6], dx[7], dx[8]};
+    ekf_quat_t q_corr;
+    ekf_quat_apply_correction(&ekf->state.quat, &dtheta, &q_corr);
+    ekf->state.quat = q_corr;
+
+    ekf->state.gyro_bias.x += dx[9];
+    ekf->state.gyro_bias.y += dx[10];
+    ekf->state.gyro_bias.z += dx[11];
+    ekf->state.accel_bias.x += dx[12];
+    ekf->state.accel_bias.y += dx[13];
+    ekf->state.accel_bias.z += dx[14];
+
+    /* ---- Step 7: Joseph 形式协方差更新 ---- */
+    /* P_new = (I-KH)·P·(I-KH)ᵀ + K·R·Kᵀ                 */
+    /*       = AP  - AP·Hᵀ·Kᵀ  + K·R·Kᵀ                  */
+    /* 其中 AP = P - K·HP = (I-KH)·P                       */
+
+    /* AP = P - K·HP  (15×15) */
+    float AP[15][15];
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++) {
+            float s = 0.0f;
+            for (int k = 0; k < n; k++)
+                s += K[i][k] * HP[k][j];
+            AP[i][j] = P[i][j] - s;
+        }
+
+    /* AP_Ht = AP · Hᵀ  (15 × n) */
+    float AP_Ht[15][3];
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < n; j++) {
+            float s = 0.0f;
+            for (int k = 0; k < N; k++)
+                s += AP[i][k] * H[j * N + k]; /* Hᵀ[k][j] = H[j*N+k] */
+            AP_Ht[i][j] = s;
+        }
+
+    /* KR = K · R  (15 × n) */
+    float KR[15][3];
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < n; j++) {
+            float s = 0.0f;
+            for (int k = 0; k < n; k++)
+                s += K[i][k] * R[k * n + j];
+            KR[i][j] = s;
+        }
+
+    /* P_new[i][j] = AP[i][j] + Σ_k (KR[i][k] - AP_Ht[i][k]) · K[j][k] */
+    for (int i = 0; i < N; i++)
+        for (int j = i; j < N; j++) {
+            float s = AP[i][j];
+            for (int k = 0; k < n; k++)
+                s += (KR[i][k] - AP_Ht[i][k]) * K[j][k];
+            P[i][j] = s;
+            if (j != i)
+                P[j][i] = s;
+        }
+}
+
+/* ========================================================================== */
+/*  ekf_types.h — 四元数与状态工具实现                                          */
 /* ========================================================================== */
 
 void ekf_quat_normalize(ekf_quat_t* q) {
-    float n = sqrtf(q->w * q->w + q->x * q->x + q->y * q->y + q->z * q->z);
-    if (n < EPS_F) {
-        q->w = 1;
-        q->x = q->y = q->z = 0;
+    float n2 = q->w * q->w + q->x * q->x + q->y * q->y + q->z * q->z;
+    if (n2 < 1e-20f) {
+        q->w = 1.0f;
+        q->x = q->y = q->z = 0.0f;
         return;
     }
-    float inv = 1.0f / n;
+    float inv = 1.0f / sqrtf(n2);
     q->w *= inv;
     q->x *= inv;
     q->y *= inv;
     q->z *= inv;
 }
 
-void ekf_quat_mult(const ekf_quat_t* a, const ekf_quat_t* b, ekf_quat_t* out) {
-    out->w = a->w * b->w - a->x * b->x - a->y * b->y - a->z * b->z;
-    out->x = a->w * b->x + a->x * b->w + a->y * b->z - a->z * b->y;
-    out->y = a->w * b->y - a->x * b->z + a->y * b->w + a->z * b->x;
-    out->z = a->w * b->z + a->x * b->y - a->y * b->x + a->z * b->w;
-}
-
 void ekf_quat_to_rotmat(const ekf_quat_t* q, ekf_mat3_t* R) {
     float w = q->w, x = q->x, y = q->y, z = q->z;
+    float x2 = x * x, y2 = y * y, z2 = z * z;
+    float wx = w * x, wy = w * y, wz = w * z;
+    float xy = x * y, xz = x * z, yz = y * z;
 
-    /* 标准 Hamilton 公式产出 R_b2w (body→world) */
-    float r00 = 1.0f - 2.0f * (y * y + z * z);
-    float r01 = 2.0f * (x * y - w * z);
-    float r02 = 2.0f * (x * z + w * y);
-    float r10 = 2.0f * (x * y + w * z);
-    float r11 = 1.0f - 2.0f * (x * x + z * z);
-    float r12 = 2.0f * (y * z - w * x);
-    float r20 = 2.0f * (x * z - w * y);
-    float r21 = 2.0f * (y * z + w * x);
-    float r22 = 1.0f - 2.0f * (x * x + y * y);
-
-    /* 转置输出: R_w2b (world→body), 满足 v_body = R · v_world */
-    R->m[0][0] = r00;
-    R->m[0][1] = r10;
-    R->m[0][2] = r20;
-    R->m[1][0] = r01;
-    R->m[1][1] = r11;
-    R->m[1][2] = r21;
-    R->m[2][0] = r02;
-    R->m[2][1] = r12;
-    R->m[2][2] = r22;
+    R->m[0][0] = 1.0f - 2.0f * (y2 + z2);
+    R->m[0][1] = 2.0f * (xy + wz);
+    R->m[0][2] = 2.0f * (xz - wy);
+    R->m[1][0] = 2.0f * (xy - wz);
+    R->m[1][1] = 1.0f - 2.0f * (x2 + z2);
+    R->m[1][2] = 2.0f * (yz + wx);
+    R->m[2][0] = 2.0f * (xz + wy);
+    R->m[2][1] = 2.0f * (yz - wx);
+    R->m[2][2] = 1.0f - 2.0f * (x2 + y2);
 }
 
 void ekf_quat_to_euler(const ekf_quat_t* q, ekf_euler_t* euler) {
@@ -276,10 +503,9 @@ void ekf_quat_to_euler(const ekf_quat_t* q, ekf_euler_t* euler) {
     euler->roll = atan2f(sinr, cosr);
 
     float sinp = 2.0f * (w * y - z * x);
-    if (fabsf(sinp) >= 1.0f)
-        euler->pitch = copysignf(M_PI_F / 2.0f, sinp);
-    else
-        euler->pitch = asinf(sinp);
+    euler->pitch = (fabsf(sinp) >= 1.0f)
+                       ? copysignf(M_PI_F * 0.5f, sinp)
+                       : asinf(sinp);
 
     float siny = 2.0f * (w * z + x * y);
     float cosy = 1.0f - 2.0f * (y * y + z * z);
@@ -287,54 +513,47 @@ void ekf_quat_to_euler(const ekf_quat_t* q, ekf_euler_t* euler) {
 }
 
 void ekf_euler_to_quat(const ekf_euler_t* euler, ekf_quat_t* q) {
-    float cr = cosf(euler->roll * 0.5f);
-    float sr = sinf(euler->roll * 0.5f);
-    float cp = cosf(euler->pitch * 0.5f);
-    float sp = sinf(euler->pitch * 0.5f);
-    float cy = cosf(euler->yaw * 0.5f);
-    float sy = sinf(euler->yaw * 0.5f);
+    float hr = euler->roll * 0.5f;
+    float hp = euler->pitch * 0.5f;
+    float hy = euler->yaw * 0.5f;
+    float cr = cosf(hr), sr = sinf(hr), cp = cosf(hp), sp = sinf(hp);
+    float cy = cosf(hy), sy = sinf(hy);
 
-    q->w = cr * cp * cy + sr * sp * sy;
-    q->x = sr * cp * cy - cr * sp * sy;
-    q->y = cr * sp * cy + sr * cp * sy;
-    q->z = cr * cp * sy - sr * sp * cy;
+    q->w = cr * cp * cy - sr * sp * sy;
+    q->x = sr * cp * cy + cr * sp * sy;
+    q->y = cr * sp * cy - sr * cp * sy;
+    q->z = cr * cp * sy + sr * sp * cy;
 }
 
-void ekf_quat_apply_correction(const ekf_quat_t* q_nom,
+void ekf_quat_mult(const ekf_quat_t* q1, const ekf_quat_t* q2, ekf_quat_t* o) {
+    o->w = q1->w * q2->w - q1->x * q2->x - q1->y * q2->y - q1->z * q2->z;
+    o->x = q1->w * q2->x + q1->x * q2->w + q1->y * q2->z - q1->z * q2->y;
+    o->y = q1->w * q2->y - q1->x * q2->z + q1->y * q2->w + q1->z * q2->x;
+    o->z = q1->w * q2->z + q1->x * q2->y - q1->y * q2->x + q1->z * q2->w;
+}
+
+void ekf_quat_apply_correction(const ekf_quat_t* q,
                                const ekf_vec3_t* delta,
-                               ekf_quat_t* q_out) {
-    /*
-     * 小角度近似 q_out ≈ q_nom ⊗ [1, δθ/2] 仅在 |δθ| << 1 时有效。
-     * 当 |δθ| > 0.26 rad (15°) 时，近似误差 > 1%。
-     * 超限时缩放 δθ 使其回到有效范围，避免发散。
-     */
-    float delta_norm_sq = delta->x * delta->x +
-                          delta->y * delta->y +
-                          delta->z * delta->z;
-    const float max_delta = 0.8f;
-    const float max_delta_sq = max_delta * max_delta;
+                               ekf_quat_t* o) {
+    /* q_out = q ⊗ [1, δθ/2]  一阶近似 */
+    float hx = 0.5f * delta->x;
+    float hy = 0.5f * delta->y;
+    float hz = 0.5f * delta->z;
 
-    ekf_vec3_t clamped = *delta;
-    if (delta_norm_sq > max_delta_sq) {
-        float scale = max_delta / sqrtf(delta_norm_sq);
-        clamped.x *= scale;
-        clamped.y *= scale;
-        clamped.z *= scale;
-    }
-
-    ekf_quat_t dq;
-    dq.w = 1.0f;
-    dq.x = 0.5f * clamped.x;
-    dq.y = 0.5f * clamped.y;
-    dq.z = 0.5f * clamped.z;
-
-    ekf_quat_mult(q_nom, &dq, q_out);
-    ekf_quat_normalize(q_out);
+    o->w = q->w - q->x * hx - q->y * hy - q->z * hz;
+    o->x = q->x + q->w * hx + q->y * hz - q->z * hy;
+    o->y = q->y - q->x * hz + q->w * hy + q->z * hx;
+    o->z = q->z + q->x * hy - q->y * hx + q->w * hz;
+    ekf_quat_normalize(o);
 }
 
-void ekf_state_init_default(ekf_state_t* state) {
-    memset(state, 0, sizeof(ekf_state_t));
-    state->quat.w = 1.0f;
+void ekf_state_init_default(ekf_state_t* s) {
+    s->pos.x = s->pos.y = s->pos.z = 0.0f;
+    s->vel.x = s->vel.y = s->vel.z = 0.0f;
+    s->quat.w = 1.0f;
+    s->quat.x = s->quat.y = s->quat.z = 0.0f;
+    s->gyro_bias.x = s->gyro_bias.y = s->gyro_bias.z = 0.0f;
+    s->accel_bias.x = s->accel_bias.y = s->accel_bias.z = 0.0f;
 }
 
 void ekf_cov_init_diagonal(ekf_cov_t* P,
@@ -343,90 +562,85 @@ void ekf_cov_init_diagonal(ekf_cov_t* P,
                            float att_std,
                            float gbias_std,
                            float abias_std) {
-    memset(P, 0, sizeof(ekf_cov_t));
-
-    float vars[ESDIM];
-    for (int i = 0; i < 3; i++)
-        vars[i] = pos_std * pos_std;
-    for (int i = 3; i < 6; i++)
-        vars[i] = vel_std * vel_std;
-    for (int i = 6; i < 9; i++)
-        vars[i] = att_std * att_std;
-    for (int i = 9; i < 12; i++)
-        vars[i] = gbias_std * gbias_std;
-    for (int i = 12; i < 15; i++)
-        vars[i] = abias_std * abias_std;
-
-    for (int i = 0; i < ESDIM; i++)
-        P->data[i][i] = vars[i];
+    memset(P->data, 0, sizeof(P->data));
+    for (int i = 0; i < 3; i++) {
+        P->data[0 + i][0 + i] = pos_std * pos_std;       /* δp */
+        P->data[3 + i][3 + i] = vel_std * vel_std;       /* δv */
+        P->data[6 + i][6 + i] = att_std * att_std;       /* δθ */
+        P->data[9 + i][9 + i] = gbias_std * gbias_std;   /* δbg */
+        P->data[12 + i][12 + i] = abias_std * abias_std; /* δba */
+    }
 }
 
 /* ========================================================================== */
-/*  Section 3: ekf_sensors.h 辅助函数实现                                      */
+/*  ekf_sensors.h — 传感器工具实现                                             */
 /* ========================================================================== */
 
 void ekf_noise_params_init_default(ekf_noise_params_t* p) {
-    p->gyro_noise = 1.0e-2f;
-    p->gyro_bias_noise = 1.0e-4f;
-    p->accel_noise = 5.0e-2f;
-    p->accel_bias_noise = 1.0e-3f;
-    p->mag_noise = 0.3f;
-    p->baro_noise = 0.5f;
-    p->baro_bias_noise = 0.01f;
-    p->gps_pos_noise = 1.5f;
-    p->gps_vel_noise = 0.3f;
-    p->optflow_noise = 0.05f;
+    p->gyro_noise = 1.0e-2f;       /* rad/s/√Hz   */
+    p->gyro_bias_noise = 1.0e-4f;  /* rad/s/√s    */
+    p->accel_noise = 5.0e-2f;      /* m/s²/√Hz    */
+    p->accel_bias_noise = 1.0e-3f; /* m/s²/√s     */
+    p->mag_noise = 0.5f;           /* μT/√Hz      */
+    p->baro_noise = 0.5f;          /* m/√Hz       */
+    p->baro_bias_noise = 5.0e-2f;  /* m/√s        */
+    p->gps_pos_noise = 2.0f;       /* m (1σ)      */
+    p->gps_vel_noise = 0.5f;       /* m/s (1σ)    */
+    p->optflow_noise = 0.05f;      /* (m/s)/√Hz   */
 }
 
-void ekf_gps_origin_init(ekf_gps_origin_t* o, double lat, double lon, float alt) {
-    if (o->initialized)
-        return;
-    o->lat0 = lat;
-    o->lon0 = lon;
-    o->alt0 = alt;
-    o->initialized = 1;
-}
-
-void ekf_gps_to_ned(const ekf_gps_origin_t* o,
+void ekf_gps_to_ned(const ekf_gps_origin_t* origin,
                     double lat,
                     double lon,
                     float alt,
                     ekf_vec3_t* ned) {
-    static const double R_EARTH = 6371000.0;
-    double dlat = (lat - o->lat0) * M_PI_F / 180.0;
-    double dlon = (lon - o->lon0) * M_PI_F / 180.0;
-    double cos_lat0 = cos(o->lat0 * M_PI_F / 180.0);
+    /* 小角度近似，距原点 10 km 内精度 < 1 m */
+    const double R = 6371000.0;
+    double dlat = (lat - origin->lat0) * (double)M_PI_F / 180.0;
+    double dlon = (lon - origin->lon0) * (double)M_PI_F / 180.0;
+    double cos_lat0 = cos(origin->lat0 * (double)M_PI_F / 180.0);
 
-    ned->x = (float)(dlat * R_EARTH);
-    ned->y = (float)(dlon * R_EARTH * cos_lat0);
-    ned->z = -(alt - o->alt0);
+    ned->x = (float)(dlat * R);            /* N */
+    ned->y = (float)(dlon * R * cos_lat0); /* E */
+    ned->z = -(alt - origin->alt0);        /* D = -alt */
+}
+
+void ekf_gps_origin_init(ekf_gps_origin_t* origin,
+                         double lat,
+                         double lon,
+                         float alt) {
+    if (origin->initialized)
+        return;
+    origin->lat0 = lat;
+    origin->lon0 = lon;
+    origin->alt0 = alt;
+    origin->initialized = 1;
 }
 
 /* ========================================================================== */
-/*  Section 4: EKF 初始化与对准                                                */
+/*  ekf_core.h — 初始化 / 对准                                                 */
 /* ========================================================================== */
 
 void ekf_init(ekf_t* ekf, const ekf_noise_params_t* noise) {
     memset(ekf, 0, sizeof(ekf_t));
-    ekf_state_init_default(&ekf->state);
 
-    if (noise) {
+    if (noise)
         ekf->noise = *noise;
-    } else {
+    else
         ekf_noise_params_init_default(&ekf->noise);
-    }
 
-    ekf->noise.accel_bias_noise = 5.0e-5f; /* 比默认 1e-3 小 20 倍 */
-
-    ekf_cov_init_diagonal(&ekf->P, 10.0f, 1.0f, 0.5f, 0.1f, 0.3f);
-
-    ekf->initialized = 0;
-    ekf->baro_altitude_initialized = 0;
+    ekf_state_init_default(&ekf->state);
+    /* 合理的初始不确定度 */
+    ekf_cov_init_diagonal(&ekf->P,
+                          10.0f,  /* 位置 10 m    */
+                          1.0f,   /* 速度 1 m/s   */
+                          0.17f,  /* 姿态 ~10°    */
+                          0.01f,  /* gyro bias    */
+                          0.05f); /* accel bias   */
 }
 
-/* [FIX] 用初始高度设置 NED 位置 */
 void ekf_set_init_altitude(ekf_t* ekf, float altitude) {
-    ekf->state.pos.z = -altitude; /* NED: pos.z = -altitude */
+    ekf->state.pos.z = -altitude; /* NED: D = -altitude */
 }
 
 int ekf_align(ekf_t* ekf,
@@ -437,825 +651,350 @@ int ekf_align(ekf_t* ekf,
     if (imu_n < 10)
         return -1;
 
-    float sum_ax = 0, sum_ay = 0, sum_az = 0;
-    float sum_gx = 0, sum_gy = 0, sum_gz = 0;
-
+    /* ---- 均值 ---- */
+    float ax = 0, ay = 0, az = 0, wx = 0, wy = 0, wz = 0;
     for (int i = 0; i < imu_n; i++) {
-        sum_ax += imu[i].accel.a_x;
-        sum_ay += imu[i].accel.a_y;
-        sum_az += imu[i].accel.a_z;
-        sum_gx += imu[i].gyro.omega_x;
-        sum_gy += imu[i].gyro.omega_y;
-        sum_gz += imu[i].gyro.omega_z;
+        ax += imu[i].accel.a_x;
+        ay += imu[i].accel.a_y;
+        az += imu[i].accel.a_z;
+        wx += imu[i].gyro.omega_x;
+        wy += imu[i].gyro.omega_y;
+        wz += imu[i].gyro.omega_z;
     }
+    float inv_n = 1.0f / (float)imu_n;
+    ax *= inv_n;
+    ay *= inv_n;
+    az *= inv_n;
+    wx *= inv_n;
+    wy *= inv_n;
+    wz *= inv_n;
 
-    float ax = sum_ax / imu_n;
-    float ay = sum_ay / imu_n;
-    float az = sum_az / imu_n;
-    float gx = sum_gx / imu_n;
-    float gy = sum_gy / imu_n;
-    float gz = sum_gz / imu_n;
-
+    /* 加速度幅值检查 */
     float a_norm = sqrtf(ax * ax + ay * ay + az * az);
-    if (fabsf(a_norm - EKF_GRAVITY) > 2.0f)
-        return -2;
+    if (a_norm < EKF_GRAVITY * 0.5f)
+        return -2; /* 疑似自由落体/震动 */
 
+    /* ---- Roll / Pitch ---- */
     float roll = atan2f(-ay, -az);
     float pitch = atan2f(ax, sqrtf(ay * ay + az * az));
+
+    /* ---- Yaw (磁力计) ---- */
     float yaw = 0.0f;
-
-    if (mag && mag_n > 0) {
-        float sum_mx = 0, sum_my = 0, sum_mz = 0;
+    if (mag && mag_n > 0 && ekf->mag_ref.calibrated) {
+        float mx = 0, my = 0, mz = 0;
         for (int i = 0; i < mag_n; i++) {
-            sum_mx += mag[i].m_x;
-            sum_my += mag[i].m_y;
-            sum_mz += mag[i].m_z;
+            mx += mag[i].m_x;
+            my += mag[i].m_y;
+            mz += mag[i].m_z;
         }
-        float mx = sum_mx / mag_n;
-        float my = sum_my / mag_n;
-        float mz = sum_mz / mag_n;
+        float inv_m = 1.0f / (float)mag_n;
+        mx *= inv_m;
+        my *= inv_m;
+        mz *= inv_m;
 
-        float sr = sinf(roll), cr = cosf(roll);
-        float sp = sinf(pitch), cp = cosf(pitch);
+        /* 去倾斜: R_partial^T · m_body  (body→level) */
+        float cr = cosf(roll), sr = sinf(roll);
+        float cp = cosf(pitch), sp = sinf(pitch);
 
-        float m_hx = mx * cp + my * sr * sp + mz * cr * sp;
-        float m_hy = my * cr - mz * sr;
-        yaw = atan2f(m_hy, m_hx);
+        /* t = Rx(-roll) · m */
+        float t0 = mx;
+        float t1 = cr * my - sr * mz;
+        float t2 = sr * my + cr * mz;
 
-        ekf_euler_t euler_init = {roll, pitch, yaw};
-        ekf_quat_t q_init;
-        ekf_euler_to_quat(&euler_init, &q_init);
-        ekf_mat3_t R_init;
-        ekf_quat_to_rotmat(&q_init, &R_init);
+        /* m_level = Ry(-pitch) · t */
+        float ml0 = cp * t0 + sp * t2;
+        float ml1 = t1;
 
-        ekf_mag_reference_t* ref = &ekf->mag_ref;
-        float mb[3] = {mx, my, mz};
-        float R_T[3][3];
-        m3_trans(R_init.m, R_T);
-        float m_earth_arr[3];
-        m3_mul_v(R_T, mb, m_earth_arr);
-
-        ref->m_earth.x = m_earth_arr[0];
-        ref->m_earth.y = m_earth_arr[1];
-        ref->m_earth.z = m_earth_arr[2];
-
-        ref->total_field = sqrtf(ref->m_earth.x * ref->m_earth.x +
-                                 ref->m_earth.y * ref->m_earth.y +
-                                 ref->m_earth.z * ref->m_earth.z);
-        ref->declination = atan2f(ref->m_earth.y, ref->m_earth.x);
-        ref->inclination = atan2f(-ref->m_earth.z,
-                                  sqrtf(ref->m_earth.x * ref->m_earth.x +
-                                        ref->m_earth.y * ref->m_earth.y));
-        ref->calibrated = 1;
+        /* yaw = atan2(ml·mE - ml·mN, ml·mN + ml·mE) */
+        float mN = ekf->mag_ref.m_earth.x;
+        float mE = ekf->mag_ref.m_earth.y;
+        yaw = atan2f(ml0 * mE - ml1 * mN, ml0 * mN + ml1 * mE);
     }
 
-    /* ---- 设置初始状态 ---- */
-    /* 保留 pos.z (可能已由 ekf_set_init_altitude 设置) */
-    float saved_pz = ekf->state.pos.z;
+    /* ---- 设四元数 ---- */
+    ekf_euler_t euler = {roll, pitch, yaw};
+    ekf_euler_to_quat(&euler, &ekf->state.quat);
 
-    ekf_state_init_default(&ekf->state);
-    ekf->state.pos.z = saved_pz; /* [FIX] 恢复高度 */
+    /* ---- 设 bias ---- */
+    ekf->state.gyro_bias.x = wx;
+    ekf->state.gyro_bias.y = wy;
+    ekf->state.gyro_bias.z = wz;
+    /* accel bias 初始为 0，靠在线估计 */
 
-    ekf_euler_t euler_init = {roll, pitch, yaw};
-    ekf_euler_to_quat(&euler_init, &ekf->state.quat);
-
-    ekf->state.gyro_bias.x = gx;
-    ekf->state.gyro_bias.y = gy;
-    ekf->state.gyro_bias.z = gz;
-
-    ekf->state.accel_bias.x = 0;
-    ekf->state.accel_bias.y = 0;
-    ekf->state.accel_bias.z = 0;
-
+    /* 重新初始化协方差 (对准后不确定度降低) */
     ekf_cov_init_diagonal(&ekf->P,
-                          5.0f, 0.5f, 0.1f, 0.05f, 0.3f);
+                          5.0f, 0.5f, 0.05f, 0.005f, 0.05f);
 
     ekf->initialized = 1;
     return 0;
 }
 
 /* ========================================================================== */
-/*  Section 5: 状态预测 (Nominal State Propagation)                            */
+/*  ekf_core.h — 预测                                                         */
 /* ========================================================================== */
-
-static void ekf_get_rotmat(const ekf_t* ekf, float R[3][3], float RT[3][3]) {
-    ekf_mat3_t Rm;
-    ekf_quat_to_rotmat(&ekf->state.quat, &Rm);
-    memcpy(R, Rm.m, sizeof(float) * 9);
-    if (RT)
-        m3_trans(R, RT);
-}
 
 void ekf_predict(ekf_t* ekf, const ekf_imu_t* imu) {
-    if (!ekf->initialized)
-        return;
-
-    uint64_t now_us = imu->header.timestamp_us;
-    if (ekf->last_predict_us == 0) {
-        ekf->last_predict_us = now_us;
-        return;
+    /* 计算 Δt */
+    float dt = 0.0f;
+    if (ekf->last_predict_us > 0) {
+        dt = (float)(imu->header.timestamp_us - ekf->last_predict_us) * 1e-6f;
+        if (dt <= 0.0f || dt > 0.1f) {
+            ekf->last_predict_us = imu->header.timestamp_us;
+            return; /* 跳过异常帧 */
+        }
     }
-    float dt = (float)(now_us - ekf->last_predict_us) * 1e-6f;
-    ekf->last_predict_us = now_us;
-    if (dt <= 0 || dt > 0.1f)
+    ekf->last_predict_us = imu->header.timestamp_us;
+    if (dt == 0.0f || !ekf->initialized)
         return;
 
-    /* ================================================================ */
-    /*  5a: 标称状态传播                                                  */
-    /* ================================================================ */
+    /* ---- 1. 去偏测量 ---- */
+    float wx = imu->gyro.omega_x - ekf->state.gyro_bias.x;
+    float wy = imu->gyro.omega_y - ekf->state.gyro_bias.y;
+    float wz = imu->gyro.omega_z - ekf->state.gyro_bias.z;
+    float ax = imu->accel.a_x - ekf->state.accel_bias.x;
+    float ay = imu->accel.a_y - ekf->state.accel_bias.y;
+    float az = imu->accel.a_z - ekf->state.accel_bias.z;
 
-    float omega[3] = {
-        imu->gyro.omega_x - ekf->state.gyro_bias.x,
-        imu->gyro.omega_y - ekf->state.gyro_bias.y,
-        imu->gyro.omega_z - ekf->state.gyro_bias.z};
-    float a_meas[3] = {
-        imu->accel.a_x - ekf->state.accel_bias.x,
-        imu->accel.a_y - ekf->state.accel_bias.y,
-        imu->accel.a_z - ekf->state.accel_bias.z};
-
-    float R[3][3], RT[3][3];
-    ekf_get_rotmat(ekf, R, RT);
-
-    /* 四元数传播: 精确积分 */
-    float omega_norm = v3_norm(omega);
+    /* ---- 2. 四元数精确积分 (指数映射) ---- */
+    float omega2 = wx * wx + wy * wy + wz * wz;
     ekf_quat_t dq;
-    if (omega_norm > EPS_F) {
-        float half_angle = omega_norm * dt * 0.5f;
-        float c = cosf(half_angle);
-        float s = sinf(half_angle) / omega_norm;
-        dq.w = c;
-        dq.x = s * omega[0];
-        dq.y = s * omega[1];
-        dq.z = s * omega[2];
+    if (omega2 > 1e-12f) {
+        float omega = sqrtf(omega2);
+        float half_ang = omega * dt * 0.5f;
+        float s = sinf(half_ang) / omega;
+        dq.w = cosf(half_ang);
+        dq.x = s * wx;
+        dq.y = s * wy;
+        dq.z = s * wz;
     } else {
         dq.w = 1.0f;
-        dq.x = dq.y = dq.z = 0.0f;
+        dq.x = wx * dt * 0.5f;
+        dq.y = wy * dt * 0.5f;
+        dq.z = wz * dt * 0.5f;
     }
-    ekf_quat_mult(&ekf->state.quat, &dq, &ekf->state.quat);
+
+    ekf_quat_t q_new;
+    ekf_quat_mult(&ekf->state.quat, &dq, &q_new);
+    ekf->state.quat = q_new;
     ekf_quat_normalize(&ekf->state.quat);
 
-    ekf_get_rotmat(ekf, R, RT);
+    /* ---- 3. 计算旋转矩阵 & 地球系加速度 ---- */
+    ekf_mat3_t R;
+    ekf_quat_to_rotmat(&ekf->state.quat, &R);
 
-    /* 加速度: 世界系 = R^T * a_corrected + g_world (NED: g=[0,0,+g]) */
-    float a_world[3];
-    m3_mul_v(RT, a_meas, a_world);
-    a_world[2] += EKF_GRAVITY;
+    /* a_earth = Rᵀ · a_body + [0, 0, +g]   (NED 重力向下) */
+    float a_earth_x = R.m[0][0] * ax + R.m[1][0] * ay + R.m[2][0] * az;
+    float a_earth_y = R.m[0][1] * ax + R.m[1][1] * ay + R.m[2][1] * az;
+    float a_earth_z = R.m[0][2] * ax + R.m[1][2] * ay + R.m[2][2] * az + EKF_GRAVITY;
 
-    /* 速度/位置传播 (中点法) */
-    float vel_mid[3] = {
-    ekf->state.vel.x + 0.5f * a_world[0] * dt,
-    ekf->state.vel.y + 0.5f * a_world[1] * dt,
-    ekf->state.vel.z + 0.5f * a_world[2] * dt};
+    /* ---- 4. 位置 / 速度中点法积分 ---- */
+    ekf->state.pos.x += (ekf->state.vel.x + 0.5f * a_earth_x * dt) * dt;
+    ekf->state.pos.y += (ekf->state.vel.y + 0.5f * a_earth_y * dt) * dt;
+    ekf->state.pos.z += (ekf->state.vel.z + 0.5f * a_earth_z * dt) * dt;
 
-    ekf->state.vel.x += a_world[0] * dt;
-    ekf->state.vel.y += a_world[1] * dt;
-    ekf->state.vel.z += a_world[2] * dt;
+    ekf->state.vel.x += a_earth_x * dt;
+    ekf->state.vel.y += a_earth_y * dt;
+    ekf->state.vel.z += a_earth_z * dt;
 
-    ekf->state.pos.x += vel_mid[0] * dt;
-    ekf->state.pos.y += vel_mid[1] * dt;
-    ekf->state.pos.z += vel_mid[2] * dt;
-
-    /* ================================================================ */
-    /*  5b: 误差状态协方差传播                                            */
-    /* ================================================================ */
-
-    float f_tilde[3];
-    memcpy(f_tilde, a_meas, sizeof(float) * 3);
-
-    float skew_f[3][3], Rt_skew_f[3][3], neg_Rt_skew_f[3][3];
-    m3_skew(f_tilde, skew_f);
-    m3_mul(RT, skew_f, Rt_skew_f);
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++)
-            neg_Rt_skew_f[i][j] = -Rt_skew_f[i][j] * dt;
-
-    float skew_w[3][3], neg_skew_w_dt[3][3];
-    m3_skew(omega, skew_w);
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++)
-            neg_skew_w_dt[i][j] = -skew_w[i][j] * dt;
-
-    float neg_Rt_dt[3][3];
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++)
-            neg_Rt_dt[i][j] = -RT[i][j] * dt;
-
-    float neg_I_dt[3][3];
-    m3_zero(neg_I_dt);
-    neg_I_dt[0][0] = neg_I_dt[1][1] = neg_I_dt[2][2] = -dt;
-
-    float I_dt[3][3];
-    m3_zero(I_dt);
-    I_dt[0][0] = I_dt[1][1] = I_dt[2][2] = dt;
-
-    /* 构建 Φ = I + F·dt (15×15) */
-    float Phi[ESDIM][ESDIM];
-    m15_identity(Phi);
-
-    block_set(&Phi[0][0], 0, 3, ESDIM, &I_dt[0][0], 3, 3, 3);
-    block_set(&Phi[0][0], 3, 6, ESDIM, &neg_Rt_skew_f[0][0], 3, 3, 3);
-    block_set(&Phi[0][0], 3, 12, ESDIM, &neg_Rt_dt[0][0], 3, 3, 3);
-
-    float tmp3[3][3];
-    block_get(&Phi[0][0], 6, 6, ESDIM, &tmp3[0][0], 3, 3, 3);
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++)
-            tmp3[i][j] += neg_skew_w_dt[i][j];
-    block_set(&Phi[0][0], 6, 6, ESDIM, &tmp3[0][0], 3, 3, 3);
-
-    block_set(&Phi[0][0], 6, 9, ESDIM, &neg_I_dt[0][0], 3, 3, 3);
-
-    /* P = Φ·P·Φ^T + Q_d */
-    float PhiP[ESDIM][ESDIM], PhiPt[ESDIM][ESDIM], Pnew[ESDIM][ESDIM];
-    m15_mul(Phi, ekf->P.data, PhiP);
-    m15_trans(Phi, PhiPt);
-    m15_mul(PhiP, PhiPt, Pnew);
-
-    float sg2 = ekf->noise.gyro_noise * ekf->noise.gyro_noise;
-    float sa2 = ekf->noise.accel_noise * ekf->noise.accel_noise;
-    float sbg2 = ekf->noise.gyro_bias_noise * ekf->noise.gyro_bias_noise;
-    float sba2 = ekf->noise.accel_bias_noise * ekf->noise.accel_bias_noise;
-
-    for (int i = 0; i < 3; i++) {
-        Pnew[3 + i][3 + i] += sa2 * dt;
-        Pnew[6 + i][6 + i] += sg2 * dt;
-        Pnew[9 + i][9 + i] += sbg2 * dt;
-        Pnew[12 + i][12 + i] += sba2 * dt;
-    }
-
-    for (int i = 0; i < ESDIM; i++)
-        for (int j = i + 1; j < ESDIM; j++) {
-            float avg = 0.5f * (Pnew[i][j] + Pnew[j][i]);
-            Pnew[i][j] = Pnew[j][i] = avg;
-        }
-
-    memcpy(ekf->P.data, Pnew, sizeof(ekf->P.data));
-
-    /* ---- P 对角线限幅 ---- */
-    float (*Pdiag)[ESDIM] = ekf->P.data;
-    for (int i = 0; i < ESDIM; i++) {
-        if (Pdiag[i][i] > 1e4f)
-            Pdiag[i][i] = 1e4f;
-    }
-
-    /* P 对角线下限: 防止 EKF 过度自信
-     * 位置: 最小 1.0 m²     (保证气压计有足够修正增益)
-     * 速度: 最小 0.1 (m/s)² (保证速度能被修正)
-     * 姿态: 最小 1e-4 rad²
-     * bias: 最小 1e-6
-     */
-    for (int i = 0; i < 3; i++) {
-        if (Pdiag[i][i] < 1.0f)
-            Pdiag[i][i] = 1.0f; /* pos */
-        if (Pdiag[3 + i][3 + i] < 0.1f)
-            Pdiag[3 + i][3 + i] = 0.1f; /* vel */
-        if (Pdiag[6 + i][6 + i] < 1e-4f)
-            Pdiag[6 + i][6 + i] = 1e-4f; /* att */
-        if (Pdiag[9 + i][9 + i] < 1e-6f)
-            Pdiag[9 + i][9 + i] = 1e-6f; /* b_g */
-        if (Pdiag[12 + i][12 + i] < 1e-6f)
-            Pdiag[12 + i][12 + i] = 1e-6f; /* b_a */
-    }
-
-    /* ---- 全局 NaN/Inf 检测 ---- */
-    {
-        int corrupted = 0;
-        float* s = &ekf->state.pos.x;
-        for (int i = 0; i < (int)(sizeof(ekf_state_t) / sizeof(float)); i++) {
-            if (!isfinite(s[i])) {
-                corrupted = 1;
-                break;
-            }
-        }
-        if (!isfinite(ekf->state.quat.w) || !isfinite(ekf->state.quat.x) ||
-            !isfinite(ekf->state.quat.y) || !isfinite(ekf->state.quat.z))
-            corrupted = 1;
-
-        if (corrupted) {
-            float saved_alt = -ekf->state.pos.z;
-            ekf_state_init_default(&ekf->state);
-            ekf->state.pos.z = isfinite(saved_alt) ? -saved_alt : 0;
-            ekf_cov_init_diagonal(&ekf->P, 10.0f, 1.0f, 0.5f, 0.1f, 0.5f);
-            ekf->baro_altitude_initialized = 0; /* 让气压计重新初始化 */
-        }
-    }
+    /* ---- 5. 协方差传播 ---- */
+    propagate_covariance(ekf, &R, ax, ay, az, wx, wy, wz, dt);
 }
 
 /* ========================================================================== */
-/*  Section 6: 误差状态注入与重置                                              */
+/*  ekf_core.h — 量测更新                                                     */
 /* ========================================================================== */
-
-static void ekf_inject_and_reset(ekf_t* ekf, const float dx[ESDIM]) {
-    ekf->state.pos.x += dx[0];
-    ekf->state.pos.y += dx[1];
-    ekf->state.pos.z += dx[2];
-
-    ekf->state.vel.x += dx[3];
-    ekf->state.vel.y += dx[4];
-    ekf->state.vel.z += dx[5];
-
-    ekf_vec3_t delta_theta = {dx[6], dx[7], dx[8]};
-    ekf_quat_apply_correction(&ekf->state.quat, &delta_theta, &ekf->state.quat);
-
-    ekf->state.gyro_bias.x += dx[9];
-    ekf->state.gyro_bias.y += dx[10];
-    ekf->state.gyro_bias.z += dx[11];
-
-    ekf->state.accel_bias.x += dx[12];
-    ekf->state.accel_bias.y += dx[13];
-    ekf->state.accel_bias.z += dx[14];
-
-    float dt_vec[3] = {dx[6], dx[7], dx[8]};
-    float skew_dt[3][3];
-    m3_skew(dt_vec, skew_dt);
-
-    float Gr_theta[3][3];
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++)
-            Gr_theta[i][j] = (i == j ? 1.0f : 0.0f) - 0.5f * skew_dt[i][j];
-
-    float (*P)[ESDIM] = ekf->P.data;
-
-    for (int j = 0; j < ESDIM; j++) {
-        float col[3] = {P[6][j], P[7][j], P[8][j]};
-        float out[3];
-        m3_mul_v(Gr_theta, col, out);
-        P[6][j] = out[0];
-        P[7][j] = out[1];
-        P[8][j] = out[2];
-    }
-
-    float Gr_theta_T[3][3];
-    m3_trans(Gr_theta, Gr_theta_T);
-    for (int i = 0; i < ESDIM; i++) {
-        float row[3] = {P[i][6], P[i][7], P[i][8]};
-        float out[3];
-        m3_mul_v(Gr_theta_T, row, out);
-        P[i][6] = out[0];
-        P[i][7] = out[1];
-        P[i][8] = out[2];
-    }
-
-    for (int i = 0; i < ESDIM; i++)
-        for (int j = i + 1; j < ESDIM; j++) {
-            float avg = 0.5f * (P[i][j] + P[j][i]);
-            P[i][j] = P[j][i] = avg;
-        }
-}
-
-/* ========================================================================== */
-/*  Section 7: 通用 Kalman 更新                                                */
-/* ========================================================================== */
-
-static void ekf_update_generic(ekf_t* ekf,
-                               const float z[],
-                               const float h[],
-                               const float H[][ESDIM],
-                               const float R_noise[][MAX_MDIM],
-                               int dim_m) {
-    if (!ekf->initialized)
-        return;
-
-    float (*P)[ESDIM] = ekf->P.data;
-
-    /* ---- 新息 ---- */
-    float y[MAX_MDIM];
-    for (int i = 0; i < dim_m; i++)
-        y[i] = z[i] - h[i];
-
-    /* ---- PH^T ---- */
-    float PHt[ESDIM][MAX_MDIM];
-    for (int i = 0; i < ESDIM; i++)
-        for (int j = 0; j < dim_m; j++) {
-            float s = 0;
-            for (int k = 0; k < ESDIM; k++)
-                s += P[i][k] * H[j][k];
-            PHt[i][j] = s;
-        }
-
-    /* ---- S = H·PH^T + R ---- */
-    float S[MAX_MDIM][MAX_MDIM];
-    for (int i = 0; i < dim_m; i++)
-        for (int j = 0; j < dim_m; j++) {
-            float s = 0;
-            for (int k = 0; k < ESDIM; k++)
-                s += H[i][k] * PHt[k][j];
-            S[i][j] = s + R_noise[i][j];
-        }
-
-    /* ---- S^{-1} ---- */
-    float S_inv[MAX_MDIM][MAX_MDIM];
-    if (dim_m == 1) {
-        if (S[0][0] < EPS_F)
-            return;
-        S_inv[0][0] = 1.0f / S[0][0];
-    } else if (dim_m == 2) {
-        float det = S[0][0] * S[1][1] - S[0][1] * S[1][0];
-        if (fabsf(det) < EPS_F)
-            return;
-        float inv_det = 1.0f / det;
-        S_inv[0][0] = S[1][1] * inv_det;
-        S_inv[0][1] = -S[0][1] * inv_det;
-        S_inv[1][0] = -S[1][0] * inv_det;
-        S_inv[1][1] = S[0][0] * inv_det;
-    } else {
-        if (m3_inv(S, S_inv) < EPS_F)
-            return;
-    }
-
-    /* ---- K = PH^T · S^{-1} ---- */
-    float K[ESDIM][MAX_MDIM];
-    for (int i = 0; i < ESDIM; i++)
-        for (int j = 0; j < dim_m; j++) {
-            float s = 0;
-            for (int k = 0; k < dim_m; k++)
-                s += PHt[i][k] * S_inv[k][j];
-            K[i][j] = s;
-        }
-
-    /* ---- 卡方检验 ---- */
-    float chi2 = 0;
-    for (int i = 0; i < dim_m; i++) {
-        float Sy_i = 0;
-        for (int j = 0; j < dim_m; j++)
-            Sy_i += S_inv[i][j] * y[j];
-        chi2 += y[i] * Sy_i;
-    }
-    float chi2_threshold = (float)dim_m * 25.0f; /* 5σ */
-    if (chi2 > chi2_threshold) {
-        /* [FIX] 卡方拒绝时膨胀相关 P 对角线
-         * 原来: 直接 return，P 不变 → 下次还是拒绝 → 恶性循环
-         * 现在: 膨胀 P → 下次 S 更大 → chi2 更小 → 最终能通过
-         *
-         * 膨胀系数: chi2 超限越多，膨胀越快
-         * chi2 = 50 (刚超限): ×1.5
-         * chi2 = 500 (严重):  ×4.5
-         */
-        float inflate = 1.0f + 0.01f * (chi2 / chi2_threshold - 1.0f);
-        if (inflate > 5.0f)
-            inflate = 5.0f;
-
-        /* 找到本次量测涉及的状态分量并膨胀 */
-        for (int j = 0; j < ESDIM; j++) {
-            /* 如果 H 矩阵第 j 列非零，说明量测涉及状态 j */
-            int involved = 0;
-            for (int i = 0; i < dim_m; i++) {
-                if (fabsf(H[i][j]) > 1e-10f) {
-                    involved = 1;
-                    break;
-                }
-            }
-            if (involved) {
-                P[j][j] *= inflate;
-            }
-        }
-        return;
-    }
-
-    /* ---- dx = K · y ---- */
-    float dx[ESDIM];
-    for (int i = 0; i < ESDIM; i++) {
-        float s = 0;
-        for (int j = 0; j < dim_m; j++)
-            s += K[i][j] * y[j];
-        dx[i] = s;
-    }
-
-    /* ---- [防线2a] dx 大小保护 ---- */
-    /*
-     * 单次量测修正不应超过物理合理范围:
-     *   位置: 5m      速度: 3 m/s    姿态: 15°(0.26rad)
-     *   gyro bias: 0.1 rad/s   accel bias: 0.5 m/s²
-     *
-     * 超限说明量测与状态严重不一致，跳过修正。
-     */
-    static const float dx_limit[ESDIM] = {
-        5.0f, 5.0f, 5.0f, /* δp */
-        3.0f, 3.0f, 3.0f, /* δv */
-        0.5f, 0.5f, 0.5f, /* δθ */
-        0.1f, 0.1f, 0.1f, /* δb_g */
-        0.5f, 0.5f, 0.5f  /* δb_a */
-    };
-    for (int i = 0; i < ESDIM; i++) {
-        if (fabsf(dx[i]) > dx_limit[i]) {
-            dx[i] = copysignf(dx_limit[i], dx[i]);
-        }
-    }
-
-    /* ---- [防线2b] NaN 检测 ---- */
-    for (int i = 0; i < ESDIM; i++) {
-        if (!isfinite(dx[i]))
-            return;
-    }
-
-    /* ---- Joseph 形式协方差更新 ---- */
-    float A[ESDIM][ESDIM];
-    m15_identity(A);
-    for (int i = 0; i < ESDIM; i++)
-        for (int j = 0; j < ESDIM; j++)
-            for (int k = 0; k < dim_m; k++)
-                A[i][j] -= K[i][k] * H[k][j];
-
-    float AP[ESDIM][ESDIM];
-    m15_mul(A, ekf->P.data, AP);
-
-    float At[ESDIM][ESDIM], Pnew[ESDIM][ESDIM];
-    m15_trans(A, At);
-    m15_mul(AP, At, Pnew);
-
-    float KR[ESDIM][MAX_MDIM];
-    for (int i = 0; i < ESDIM; i++)
-        for (int j = 0; j < dim_m; j++) {
-            float s = 0;
-            for (int k = 0; k < dim_m; k++)
-                s += K[i][k] * R_noise[k][j];
-            KR[i][j] = s;
-        }
-    for (int i = 0; i < ESDIM; i++)
-        for (int j = 0; j < ESDIM; j++)
-            for (int k = 0; k < dim_m; k++)
-                Pnew[i][j] += KR[i][k] * K[j][k];
-
-    for (int i = 0; i < ESDIM; i++)
-        for (int j = i + 1; j < ESDIM; j++) {
-            float avg = 0.5f * (Pnew[i][j] + Pnew[j][i]);
-            Pnew[i][j] = Pnew[j][i] = avg;
-        }
-
-    /* ---- P 对角线非负检查 ---- */
-    for (int i = 0; i < ESDIM; i++) {
-        if (Pnew[i][i] < 0.0f) {
-            return; /* 协方差异常，丢弃 */
-        }
-    }
-
-    memcpy(ekf->P.data, Pnew, sizeof(ekf->P.data));
-    ekf_inject_and_reset(ekf, dx);
-}
-
-/* ========================================================================== */
-/*  Section 8: 各传感器量测更新                                                */
-/* ========================================================================== */
-
-void ekf_update_mag(ekf_t* ekf, const ekf_mag_t* mag) {
-    if (!ekf->initialized || !ekf->mag_ref.calibrated)
-        return;
-    if (mag->header.status != EKF_SENSOR_VALID)
-        return;
-
-    /* ---- 高动态保护 ---- */
-    /* 快速旋转时磁力计受振动和硬铁干扰，yaw 修正不可靠。
-     * 通过 gyro 速率判断动态状态: |ω| > 50°/s → 跳过 */
-    float gyro_rate = v3_norm((float[]){
-        ekf->state.gyro_bias.x,
-        ekf->state.gyro_bias.y,
-        ekf->state.gyro_bias.z
-    });
-    /* 简化: 直接检查上一帧的角速率 (通过 P 的 δθ 方差判断置信度) */
-    float att_var = ekf->P.data[6][6] + ekf->P.data[7][7] + ekf->P.data[8][8];
-    if (att_var > 1.0f) {
-        /* 姿态不确定性高 → 动态中，增大磁力计噪声让修正变弱 */
-        /* 不直接跳过，让 EKF 自行判断 */
-    }
-
-    float R[3][3], RT[3][3];
-    ekf_get_rotmat(ekf, R, RT);
-
-    float m_earth[3] = {
-        ekf->mag_ref.m_earth.x,
-        ekf->mag_ref.m_earth.y,
-        ekf->mag_ref.m_earth.z};
-
-    float h[3];
-    m3_mul_v(R, m_earth, h);
-
-    float z[3] = {mag->m_x, mag->m_y, mag->m_z};
-
-    float H_mag[MAX_MDIM][ESDIM];
-    memset(H_mag, 0, sizeof(H_mag));
-
-    float Rm[3];
-    m3_mul_v(R, m_earth, Rm);
-    float skew_Rm[3][3];
-    m3_skew(Rm, skew_Rm);
-    block_set(&H_mag[0][0], 0, 6, ESDIM, &skew_Rm[0][0], 3, 3, 3);
-
-    float sigma2 = ekf->noise.mag_noise * ekf->noise.mag_noise;
-
-    /* [防线4] 姿态不确定性高 → 膨胀磁力计噪声 */
-    if (att_var > 0.1f) {
-        sigma2 *= (1.0f + att_var * 10.0f);
-    }
-
-    float R_noise[MAX_MDIM][MAX_MDIM] = {
-        {sigma2, 0, 0},
-        {0, sigma2, 0},
-        {0, 0, sigma2}};
-
-    ekf_update_generic(ekf, z, h, H_mag, R_noise, 3);
-}
-
-void ekf_update_gps(ekf_t* ekf, const ekf_gps_t* gps) {
-    if (!ekf->initialized)
-        return;
-    if (gps->header.status != EKF_SENSOR_VALID)
-        return;
-    if (gps->fix_type < 3)
-        return;
-    if (gps->num_sats < 6)
-        return;
-
-    if (!ekf->gps_origin.initialized) {
-        ekf_gps_origin_init(&ekf->gps_origin,
-                            gps->latitude, gps->longitude, gps->altitude_msl);
-        ekf->state.pos.x = 0;
-        ekf->state.pos.y = 0;
-        ekf->state.pos.z = 0;
-        return;
-    }
-
-    ekf_vec3_t gps_ned;
-    ekf_gps_to_ned(&ekf->gps_origin,
-                   gps->latitude, gps->longitude, gps->altitude_msl,
-                   &gps_ned);
-
-    float z_pos[3] = {gps_ned.x, gps_ned.y, gps_ned.z};
-    float h_pos[3] = {ekf->state.pos.x, ekf->state.pos.y, ekf->state.pos.z};
-
-    float H_pos[MAX_MDIM][ESDIM];
-    memset(H_pos, 0, sizeof(H_pos));
-    H_pos[0][0] = H_pos[1][1] = H_pos[2][2] = 1.0f;
-
-    float pos_var = gps->horiz_acc > 0 ? gps->horiz_acc : ekf->noise.gps_pos_noise;
-    pos_var *= pos_var;
-    float vert_var = gps->vert_acc > 0 ? gps->vert_acc : ekf->noise.gps_pos_noise * 1.5f;
-    vert_var *= vert_var;
-
-    float R_gps_pos[MAX_MDIM][MAX_MDIM] = {
-        {pos_var, 0, 0},
-        {0, pos_var, 0},
-        {0, 0, vert_var}};
-
-    ekf_update_generic(ekf, z_pos, h_pos, H_pos, R_gps_pos, 3);
-
-    float z_vel[3] = {gps->vel_north, gps->vel_east, gps->vel_down};
-    float h_vel[3] = {ekf->state.vel.x, ekf->state.vel.y, ekf->state.vel.z};
-
-    float H_vel[MAX_MDIM][ESDIM];
-    memset(H_vel, 0, sizeof(H_vel));
-    H_vel[0][3] = H_vel[1][4] = H_vel[2][5] = 1.0f;
-
-    float vel_var = gps->vel_acc > 0 ? gps->vel_acc : ekf->noise.gps_vel_noise;
-    vel_var *= vel_var;
-    float R_gps_vel[MAX_MDIM][MAX_MDIM] = {
-        {vel_var, 0, 0},
-        {0, vel_var, 0},
-        {0, 0, vel_var}};
-
-    ekf_update_generic(ekf, z_vel, h_vel, H_vel, R_gps_vel, 3);
-}
-
-/* 气压计更新: 用首帧读数初始化高度，跳过首帧卡方检验 */
-void ekf_update_baro(ekf_t* ekf, const ekf_baro_t* baro) {
-    if (!ekf->initialized)
-        return;
-    if (baro->header.status != EKF_SENSOR_VALID)
-        return;
-
-    /* 首帧验证 */
-    if (!ekf->baro_altitude_initialized) {
-        float predicted_alt = -ekf->state.pos.z;
-        if (fabsf(baro->altitude - predicted_alt) > 10.0f) {
-            ekf->state.pos.z = -baro->altitude;
-            ekf->state.vel.z = 0.0f;
-        }
-        ekf->baro_altitude_initialized = 1;
-    }
-
-    float z[1] = {baro->altitude};
-    float h_pred[1] = {-ekf->state.pos.z};
-
-    float H_baro[1][ESDIM];
-    memset(H_baro, 0, sizeof(H_baro));
-    H_baro[0][2] = -1.0f;
-
-    /* [FIX] 气压计噪声适当放大，让卡方更容易通过 */
-    float sigma2 = ekf->noise.baro_noise * ekf->noise.baro_noise * 4.0f;
-    float R_baro[MAX_MDIM][MAX_MDIM] = {{0}};
-    R_baro[0][0] = sigma2;
-
-    ekf_update_generic(ekf, z, h_pred, H_baro, R_baro, 1);
-}
-
-void ekf_update_optflow(ekf_t* ekf, const ekf_optflow_t* flow) {
-    if (!ekf->initialized)
-        return;
-    if (flow->header.status != EKF_SENSOR_VALID)
-        return;
-    if (flow->quality < 50)
-        return;
-    if (flow->distance_m <= 0)
-        return;
-
-    float z[2] = {flow->velocity_x, flow->velocity_y};
-
-    float R[3][3];
-    ekf_get_rotmat(ekf, R, NULL);
-
-    float v_world[3] = {
-        ekf->state.vel.x, ekf->state.vel.y, ekf->state.vel.z};
-    float v_body[3];
-    m3_mul_v(R, v_world, v_body);
-
-    float h_pred[2] = {v_body[0], v_body[1]};
-
-    float H_flow[MAX_MDIM][ESDIM];
-    memset(H_flow, 0, sizeof(H_flow));
-
-    for (int i = 0; i < 2; i++)
-        for (int j = 0; j < 3; j++)
-            H_flow[i][3 + j] = R[i][j];
-
-    float Rv[3];
-    m3_mul_v(R, v_world, Rv);
-    float skew_Rv[3][3];
-    m3_skew(Rv, skew_Rv);
-
-    for (int i = 0; i < 2; i++)
-        for (int j = 0; j < 3; j++)
-            H_flow[i][6 + j] = skew_Rv[i][j];
-
-    float h_agl = flow->distance_m;
-    float sigma_base = ekf->noise.optflow_noise / (h_agl > 0.3f ? h_agl : 0.3f);
-    float quality_factor = 1.0f + (100.0f - (float)flow->quality) / 100.0f * 3.0f;
-    float sigma2 = sigma_base * sigma_base * quality_factor;
-
-    float R_flow[MAX_MDIM][MAX_MDIM] = {
-        {sigma2, 0},
-        {0, sigma2}};
-
-    ekf_update_generic(ekf, z, h_pred, H_flow, R_flow, 2);
-}
-
-/* ------ 重力方向更新 (修正 roll/pitch) ------ */
 
 void ekf_update_gravity(ekf_t* ekf, const ekf_imu_t* imu) {
     if (!ekf->initialized)
         return;
 
-    float a_meas[3] = {
-        imu->accel.a_x - ekf->state.accel_bias.x,
-        imu->accel.a_y - ekf->state.accel_bias.y,
-        imu->accel.a_z - ekf->state.accel_bias.z};
+    /* 重力方向观测: h(x) = R · g_spec,  g_spec = [0, 0, -g] */
+    ekf_mat3_t R;
+    ekf_quat_to_rotmat(&ekf->state.quat, &R);
 
-    float a_norm = v3_norm(a_meas);
-    if (a_norm < 1.0f)
+    float g_spec[3] = {0.0f, 0.0f, -EKF_GRAVITY};
+    float hg[3];
+    m3_vec(R.m, g_spec, hg); /* 预测的加速度计输出 */
+
+    float ax = imu->accel.a_x - ekf->state.accel_bias.x;
+    float ay = imu->accel.a_y - ekf->state.accel_bias.y;
+    float az = imu->accel.a_z - ekf->state.accel_bias.z;
+
+    /* 自适应噪声: 高机动时降低对重力的信任 */
+    float a_norm = sqrtf(ax * ax + ay * ay + az * az);
+    float ratio = fabsf(a_norm / EKF_GRAVITY - 1.0f);
+    float scale = 1.0f + ratio * ratio * 200.0f; /* 调参 */
+
+    float y[3] = {ax - hg[0], ay - hg[1], az - hg[2]};
+
+    /* H = [0 0 [R·g_spec ×]  0  0]  (3×15) */
+    float skew_hg[3][3];
+    skew_sym(hg, skew_hg);
+
+    float H[3][15];
+    memset(H, 0, sizeof(H));
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            H[i][6 + j] = skew_hg[i][j];
+
+    float Rm = ekf->noise.accel_noise * ekf->noise.accel_noise * scale;
+    float R_mat[3][3] = {{Rm, 0, 0}, {0, Rm, 0}, {0, 0, Rm}};
+
+    ekf_do_update(ekf, 3, y, &H[0][0], &R_mat[0][0]);
+}
+
+void ekf_update_mag(ekf_t* ekf, const ekf_mag_t* mag) {
+    if (!ekf->initialized || !ekf->mag_ref.calibrated)
         return;
 
-    float norm_err = fabsf(a_norm - EKF_GRAVITY);
+    ekf_mat3_t R;
+    ekf_quat_to_rotmat(&ekf->state.quat, &R);
 
-    /* [FIX] 纯软衰减，无硬门限
-     * norm_err  0.0 ~ 0.3  → sigma² = 0.05 (完全信任)
-     * norm_err  0.3 ~ 2.0  → sigma² 从 0.05 指数增长到 ~50
-     * norm_err > 2.0       → 跳过 (碰撞/坠落)
-     */
-    if (norm_err > 2.0f)
+    /* h(x) = R · m_earth */
+    float m_earth[3] = {ekf->mag_ref.m_earth.x,
+                        ekf->mag_ref.m_earth.y,
+                        ekf->mag_ref.m_earth.z};
+    float hm[3];
+    m3_vec(R.m, m_earth, hm);
+
+    float y[3] = {mag->m_x - hm[0], mag->m_y - hm[1], mag->m_z - hm[2]};
+
+    /* H = [0 0 [R·m_earth ×] 0 0] */
+    float skew_hm[3][3];
+    skew_sym(hm, skew_hm);
+
+    float H[3][15];
+    memset(H, 0, sizeof(H));
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            H[i][6 + j] = skew_hm[i][j];
+
+    float Rm = ekf->noise.mag_noise * ekf->noise.mag_noise;
+    float R_mat[3][3] = {{Rm, 0, 0}, {0, Rm, 0}, {0, 0, Rm}};
+
+    ekf_do_update(ekf, 3, y, &H[0][0], &R_mat[0][0]);
+}
+
+void ekf_update_gps(ekf_t* ekf, const ekf_gps_t* gps) {
+    if (!ekf->initialized)
+        return;
+    if (gps->fix_type < 3 || gps->num_sats < 6)
         return;
 
-    float R[3][3];
-    ekf_get_rotmat(ekf, R, NULL);
-
-    float g_down[3] = {0.0f, 0.0f, -EKF_GRAVITY};
-    float h[3];
-    m3_mul_v(R, g_down, h);
-
-    float z[3] = {a_meas[0], a_meas[1], a_meas[2]};
-
-    float H_grav[MAX_MDIM][ESDIM];
-    memset(H_grav, 0, sizeof(H_grav));
-    float skew_h[3][3];
-    m3_skew(h, skew_h);
-    block_set(&H_grav[0][0], 0, 6, ESDIM, &skew_h[0][0], 3, 3, 3);
-
-    /* 噪声: 基础值 0.05² (与 accel_noise 一致) */
-    float sigma2 = 0.0025f;
-
-    /* 软衰减: 0.3 ~ 2.0 m/s² → 噪声指数增长 */
-    if (norm_err > 0.3f) {
-        float t = (norm_err - 0.3f) / 1.7f; /* 0 ~ 1 */
-        sigma2 *= (1.0f + t * t * 500.0f);  /* 1x ~ 501x */
+    /* 首次有效 GPS → 初始化原点 */
+    if (!ekf->gps_origin.initialized) {
+        ekf_gps_origin_init(&ekf->gps_origin,
+                            gps->latitude, gps->longitude, gps->altitude_msl);
     }
 
-    float R_noise[MAX_MDIM][MAX_MDIM] = {
-        {sigma2, 0.0f, 0.0f},
-        {0.0f, sigma2, 0.0f},
-        {0.0f, 0.0f, sigma2}};
+    /* WGS-84 → NED */
+    ekf_vec3_t p_ned;
+    ekf_gps_to_ned(&ekf->gps_origin,
+                   gps->latitude, gps->longitude, gps->altitude_msl,
+                   &p_ned);
 
-    ekf_update_generic(ekf, z, h, H_grav, R_noise, 3);
+    /* ---- 位置更新 (3 维) ---- */
+    float y_pos[3] = {
+        p_ned.x - ekf->state.pos.x,
+        p_ned.y - ekf->state.pos.y,
+        p_ned.z - ekf->state.pos.z};
+
+    float H_pos[3][15];
+    memset(H_pos, 0, sizeof(H_pos));
+    H_pos[0][0] = H_pos[1][1] = H_pos[2][2] = 1.0f;
+
+    float rp = gps->horiz_acc > 0.01f ? gps->horiz_acc : ekf->noise.gps_pos_noise;
+    float rp_z = gps->vert_acc > 0.01f ? gps->vert_acc : ekf->noise.gps_pos_noise;
+    float R_pos[3][3] = {{rp * rp, 0, 0},
+                         {0, rp * rp, 0},
+                         {0, 0, rp_z * rp_z}};
+
+    ekf_do_update(ekf, 3, y_pos, &H_pos[0][0], &R_pos[0][0]);
+
+    /* ---- 速度更新 (3 维) ---- */
+    float y_vel[3] = {
+        gps->vel_north - ekf->state.vel.x,
+        gps->vel_east - ekf->state.vel.y,
+        gps->vel_down - ekf->state.vel.z};
+
+    float H_vel[3][15];
+    memset(H_vel, 0, sizeof(H_vel));
+    H_vel[0][3] = H_vel[1][4] = H_vel[2][5] = 1.0f;
+
+    float rv = gps->vel_acc > 0.01f ? gps->vel_acc : ekf->noise.gps_vel_noise;
+    float R_vel[3][3] = {{rv * rv, 0, 0},
+                         {0, rv * rv, 0},
+                         {0, 0, rv * rv}};
+
+    ekf_do_update(ekf, 3, y_vel, &H_vel[0][0], &R_vel[0][0]);
+}
+
+void ekf_update_baro(ekf_t* ekf, const ekf_baro_t* baro) {
+    if (!ekf->initialized)
+        return;
+
+    /* 首次接收气压计 → 记录初始偏移 */
+    if (!ekf->baro_altitude_initialized) {
+        ekf->baro_alt_offset = baro->altitude + ekf->state.pos.z;
+        ekf->baro_altitude_initialized = 1;
+        return;
+    }
+
+    /* h(x) = -p_D,  z = altitude_relative */
+    float alt_rel = baro->altitude - ekf->baro_alt_offset;
+    float y = alt_rel - (-ekf->state.pos.z); /* = alt_rel + p_D */
+
+    /* H = [0 0 -1 0 ... 0]  (1×15) */
+    float H[15];
+    memset(H, 0, sizeof(H));
+    H[2] = -1.0f;
+
+    float R = ekf->noise.baro_noise * ekf->noise.baro_noise;
+
+    ekf_do_update(ekf, 1, &y, H, &R);
+}
+
+void ekf_update_optflow(ekf_t* ekf, const ekf_optflow_t* flow) {
+    if (!ekf->initialized)
+        return;
+    if (flow->quality < 50)
+        return; /* 质量太低，跳过 */
+
+    ekf_mat3_t R;
+    ekf_quat_to_rotmat(&ekf->state.quat, &R);
+
+    /* 预测: v_body_xy = (R · v_world)[0:2] */
+    float vw[3] = {ekf->state.vel.x, ekf->state.vel.y, ekf->state.vel.z};
+    float vb[3];
+    m3_vec(R.m, vw, vb);
+
+    float y[2] = {flow->velocity_x - vb[0], flow->velocity_y - vb[1]};
+
+    /* H = [0₂ₓ₃  R[0:2,:]  [R·v×][0:2,:]  0₂ₓ₃  0₂ₓ₃] */
+    float skew_vb[3][3];
+    skew_sym(vb, skew_vb);
+
+    float H[2][15];
+    memset(H, 0, sizeof(H));
+    for (int c = 0; c < 3; c++) {
+        H[0][3 + c] = R.m[0][c];
+        H[1][3 + c] = R.m[1][c];
+        H[0][6 + c] = skew_vb[0][c];
+        H[1][6 + c] = skew_vb[1][c];
+    }
+
+    float rn = ekf->noise.optflow_noise * ekf->noise.optflow_noise;
+    /* 高度越大光流越不可靠 */
+    if (flow->distance_m > 0.0f)
+        rn *= (1.0f + flow->distance_m * flow->distance_m * 0.1f);
+
+    float R_mat[2][2] = {{rn, 0}, {0, rn}};
+
+    ekf_do_update(ekf, 2, y, &H[0][0], &R_mat[0][0]);
 }
 
 /* ========================================================================== */
-/*  Section 9: 状态读取                                                        */
+/*  ekf_core.h — 状态读取                                                     */
 /* ========================================================================== */
 
 void ekf_get_euler(const ekf_t* ekf, ekf_euler_t* out) {
@@ -1279,5 +1018,5 @@ void ekf_get_gyro_bias(const ekf_t* ekf, ekf_vec3_t* out) {
 }
 
 int ekf_is_initialized(const ekf_t* ekf) {
-    return ekf->initialized;
+    return ekf->initialized ? 1 : 0;
 }

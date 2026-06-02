@@ -474,11 +474,9 @@ void Attitude_Update(float dt) {
     ekf_imu_t imu_pkt;
     imu_pkt.header.timestamp_us = imu_timestamp_us;
     imu_pkt.header.status = EKF_SENSOR_VALID;
-    imu_pkt.gyro.header = imu_pkt.header;
     imu_pkt.gyro.omega_x = gyro_rad[0];
     imu_pkt.gyro.omega_y = gyro_rad[1];
     imu_pkt.gyro.omega_z = gyro_rad[2];
-    imu_pkt.accel.header = imu_pkt.header;
     imu_pkt.accel.a_x = accel_ms2[0];
     imu_pkt.accel.a_y = accel_ms2[1];
     imu_pkt.accel.a_z = accel_ms2[2];

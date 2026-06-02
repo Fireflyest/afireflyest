@@ -83,7 +83,7 @@ extern "C" {
  * @brief 圆周率常量
  */
 #ifndef M_PI_F
-#define M_PI_F              3.14159265358979323846f
+#define M_PI_F              3.14159265f
 #endif
 
 /**
@@ -103,7 +103,6 @@ extern "C" {
  *   [13-15] 加速度计 bias b_a (m/s²) — 可选，去掉则状态为13维
  */
 #define EKF_STATE_DIM       16
-#define EKF_STATE_DIM_NO_BA 13   /**< 不含加速度计 bias 时的状态维度 */
 
 /**
  * @brief 误差状态 EKF 中姿态修正向量维度
@@ -121,8 +120,8 @@ extern "C" {
  * @brief 状态向量 x 中各分量的起始索引
  *
  * 使用示例:
- *   float pos_north = ekf->x[EKF_STATE_PX];
- *   float gyro_bias_x = ekf->x[EKF_STATE_BGX];
+ *   float pos_north = ekf->state.pos.x;
+ *   float gyro_bias_x = ekf->state.gyro_bias.x;
  */
 typedef enum {
     /* 位置 — NED 世界系 (m) */
@@ -213,7 +212,7 @@ typedef struct {
  *       v_body = R * v_world
  *
  * ZYX 欧拉角对应的旋转矩阵:
- *       R = Rz(ψ) · Ry(θ) · Rx(φ)
+ *       R = Rx(φ) · Ry(θ) · Rz(ψ)
  *
  * 正交约束: R^T * R = I, det(R) = +1
  */
@@ -224,7 +223,7 @@ typedef struct {
 /**
  * @brief EKF 完整状态向量
  *
- * 维度: EKF_STATE_DIM (16) 或 EKF_STATE_DIM_NO_BA (13，不含 accel bias)
+ * 维度: EKF_STATE_DIM (16)
  *
  * 初始状态假设 (水平静止、机头朝北):
  *   位置: [0, 0, 0] 或 GPS 初始值
@@ -274,7 +273,6 @@ typedef struct {
  * 对应误差状态 [δp(3), δv(3), δθ(3), δb_g(3), δb_a(3)]。
  * 行主序存储，索引 [i][j]。
  *
- * 若不使用加速度计 bias，则有效维度为 12×12。
  */
 typedef struct {
     float data[EKF_ERROR_STATE_DIM][EKF_ERROR_STATE_DIM];

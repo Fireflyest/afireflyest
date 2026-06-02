@@ -51,7 +51,8 @@ typedef struct {
 
     uint64_t last_predict_us;
     uint8_t initialized;
-    int baro_altitude_initialized;
+    float baro_alt_offset;
+    uint8_t baro_altitude_initialized;
 } ekf_t;
 
 /* ========================================================================== */
