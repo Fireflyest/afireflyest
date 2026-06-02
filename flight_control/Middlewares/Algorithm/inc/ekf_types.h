@@ -38,7 +38,7 @@
  *      R = Rz(ψ) · Ry(θ) · Rx(φ)
  *
  *      Yaw   (ψ): 绕 Z 轴，机头向右偏为正 (俯视顺时针)
- *      Pitch (θ): 绕 Y 轴，机头向下为正 (低头为正)
+ *      Pitch (θ): 绕 Y 轴，机头向上为正 (抬头为正)
  *      Roll  (φ): 绕 X 轴，右翼下沉为正 (右倾为正)
  *
  *  水平朝北时: roll = 0, pitch = 0, yaw = 0, q = [1, 0, 0, 0]
@@ -179,7 +179,7 @@ typedef struct {
  *
  * 注意事项:
  *   - Yaw  (ψ): 绕 NED-Z 轴，机头右偏为正，范围 (-π, π]
- *   - Pitch (θ): 绕旋转后 Y 轴，低头为正，范围 [-π/2, π/2]
+ *   - Pitch (θ): 绕旋转后 Y 轴，抬头为正，范围 [-π/2, π/2]
  *   - Roll  (φ): 绕旋转后 X 轴，右倾为正，范围 (-π, π]
  *
  * 全部单位为弧度 (rad)。
@@ -187,7 +187,7 @@ typedef struct {
  */
 typedef struct {
     float roll;     /**< 横滚角 φ (rad)，右倾为正   */
-    float pitch;    /**< 俯仰角 θ (rad)，低头为正   */
+    float pitch;    /**< 俯仰角 θ (rad)，抬头为正   */
     float yaw;      /**< 偏航角 ψ (rad)，右偏为正   */
 } ekf_euler_t;
 
