@@ -578,7 +578,7 @@ void ekf_cov_init_diagonal(ekf_cov_t* P,
 
 void ekf_noise_params_init_default(ekf_noise_params_t* p) {
     p->gyro_noise = 1.0e-2f;       /* rad/s/√Hz   */
-    p->gyro_bias_noise = 1.0e-4f;  /* rad/s/√s    */
+    p->gyro_bias_noise = 5.0e-3f;  /* rad/s/√s    */
     p->accel_noise = 5.0e-2f;      /* m/s²/√Hz    */
     p->accel_bias_noise = 1.0e-3f; /* m/s²/√s     */
     p->mag_noise = 0.5f;           /* μT/√Hz      */
@@ -823,7 +823,7 @@ void ekf_update_gravity(ekf_t* ekf, const ekf_imu_t* imu) {
     /* 自适应噪声: 高机动时降低对重力的信任 */
     float a_norm = sqrtf(ax * ax + ay * ay + az * az);
     float ratio = fabsf(a_norm / EKF_GRAVITY - 1.0f);
-    float scale = 1.0f + ratio * ratio * 200.0f; /* 调参 */
+    float scale = 1.0f + ratio * ratio * 120.0f; /* 调参 */
 
     float y[3] = {ax - hg[0], ay - hg[1], az - hg[2]};
 
