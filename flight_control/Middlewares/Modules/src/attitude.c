@@ -33,7 +33,7 @@
 /* ========================================================================== */
 
 /** @brief 对准所需 IMU 样本数 */
-#define ALIGN_IMU_SAMPLES 20
+#define ALIGN_IMU_SAMPLES 3
 
 #define ATTITUDE_EKF_BARO 1
 

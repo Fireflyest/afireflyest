@@ -840,7 +840,51 @@ void ekf_update_gravity(ekf_t* ekf, const ekf_imu_t* imu) {
     float Rm = ekf->noise.accel_noise * ekf->noise.accel_noise * scale;
     float R_mat[3][3] = {{Rm, 0, 0}, {0, Rm, 0}, {0, 0, Rm}};
 
+    /* ---- 保存更新前的四元数 ---- */
+    ekf_quat_t q_save = ekf->state.quat;
+
+    /* ---- 执行完整 EKF 更新 (P 和状态都更新) ---- */
+    /* P 用完整 H (含 yaw 列) 更新 → P 正确反映所有量测信息 */
     ekf_do_update(ekf, 3, y, &H[0][0], &R_mat[0][0]);
+
+    /* ---- 去除四元数修正中的 yaw 分量 ----
+     *
+     * gravity [0,0,-g] 绕世界 Z 轴旋转不变:
+     *   R(yaw) · [0,0,-g] = [0,0,-g]  对任何 yaw 成立
+     * → gravity 不含 yaw 信息
+     *
+     * 但 body 系 δθ_z 在倾斜时数学上非零:
+     *   skew(hg)[0][2] = -hg[1] ≠ 0 (当 roll ≠ 0)
+     * → 一阶雅可比引入虚假 yaw 敏感性
+     * → 倾斜时 accel bias 残差被误读为 yaw 误差 → 自旋
+     *
+     * 解决: 从四元数修正中投影去除 yaw
+     *   1. q_corr = q_new ⊗ q_old^{-1} (提取修正四元数)
+     *   2. 从 q_corr 提取欧拉角，丢弃 yaw
+     *   3. q_final = q_rollpitch ⊗ q_old
+     *
+     * P 矩阵用完整 H 更新 (包含 yaw 交叉协方差) → P 正确
+     * 状态只应用 roll/pitch 修正 → 无 yaw 漂移
+     */
+    {
+        /* q_corr = q_new ⊗ q_old^{-1} */
+        ekf_quat_t q_old_inv = {q_save.w, -q_save.x, -q_save.y, -q_save.z};
+        ekf_quat_t q_corr;
+        ekf_quat_mult(&ekf->state.quat, &q_old_inv, &q_corr);
+
+        /* 提取 roll/pitch，丢弃 yaw */
+        ekf_euler_t euler_corr;
+        ekf_quat_to_euler(&q_corr, &euler_corr);
+
+        /* 用只有 roll/pitch 的修正 */
+        ekf_euler_t euler_rp = {euler_corr.roll, euler_corr.pitch, 0.0f};
+        ekf_quat_t q_rp;
+        ekf_euler_to_quat(&euler_rp, &q_rp);
+
+        /* 应用: q_final = q_rp ⊗ q_old */
+        ekf_quat_mult(&q_rp, &q_save, &ekf->state.quat);
+        ekf_quat_normalize(&ekf->state.quat);
+    }
 }
 
 void ekf_update_mag(ekf_t* ekf, const ekf_mag_t* mag) {
