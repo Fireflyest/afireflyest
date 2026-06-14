@@ -356,9 +356,13 @@ void Attitude_Update(float dt) {
     gyro_current[1] = ((int16_t)((imu_rx_buf[8] << 8) | imu_rx_buf[9])) / 16.4f * deg2rad;
     gyro_current[2] = ((int16_t)((imu_rx_buf[10] << 8) | imu_rx_buf[11])) / 16.4f * deg2rad;
 
-    mag_current[0] = (int16_t)((mag_rx_buf[1] << 8) | mag_rx_buf[0]) * 0.02441f;
-    mag_current[1] = (int16_t)((mag_rx_buf[3] << 8) | mag_rx_buf[2]) * 0.02441f;
-    mag_current[2] = -(int16_t)((mag_rx_buf[5] << 8) | mag_rx_buf[4]) * 0.02441f;
+    int16_t mag_raw_x = (int16_t)((mag_rx_buf[1] << 8) | mag_rx_buf[0]);
+    int16_t mag_raw_y = (int16_t)((mag_rx_buf[3] << 8) | mag_rx_buf[2]);
+    int16_t mag_raw_z = (int16_t)((mag_rx_buf[5] << 8) | mag_rx_buf[4]);
+
+    mag_current[0] = (float)mag_raw_x * 0.244141f;
+    mag_current[1] = (float)mag_raw_y * 0.244141f;
+    mag_current[2] = -(float)mag_raw_z * 0.244141f;
 
     /* ================================================================== */
     /*  Step 2: 传感器校准                                                  */

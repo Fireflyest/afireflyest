@@ -209,9 +209,14 @@ int main() {
         MMC5983MA_ReadMagRaw(&mmc, &mag_data);
 
         {
-            int16_t x = (int16_t)(mag_data.x - MMC_NULL_FIELD_16BIT);
-            int16_t y = (int16_t)(mag_data.y - MMC_NULL_FIELD_16BIT);
-            int16_t z = (int16_t)(mag_data.z - MMC_NULL_FIELD_16BIT);
+            int32_t x_centered = (int32_t)mag_data.x - (int32_t)MMC_NULL_FIELD_16BIT;
+            int32_t y_centered = (int32_t)mag_data.y - (int32_t)MMC_NULL_FIELD_16BIT;
+            int32_t z_centered = (int32_t)mag_data.z - (int32_t)MMC_NULL_FIELD_16BIT;
+
+            /* 限幅，防止异常值打包溢出 (16-bit 模式范围本身就在 int16 内，正常不会越界) */
+            int16_t x = (int16_t)x_centered;
+            int16_t y = (int16_t)y_centered;
+            int16_t z = (int16_t)z_centered;
 
             mag_rx_buf[0] = (uint8_t)(x & 0xFF);
             mag_rx_buf[1] = (uint8_t)((x >> 8) & 0xFF);

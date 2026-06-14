@@ -54,6 +54,14 @@
 #define MMC_NULL_FIELD_16BIT 32768
 #define MMC_NULL_FIELD_18BIT 131072
 
+/* MMC5983MA 灵敏度
+ * 满量程 ±8 Gauss = ±800 µT
+ * 18-bit: 262144 LSB / 16 Gauss → 16384 LSB/Gauss → 0.061035 µT/LSB
+ * 16-bit: 65536 LSB / 16 Gauss  → 4096 LSB/Gauss  → 0.244141 µT/LSB
+ */
+#define MMC5983MA_SENS_UT_PER_LSB_16BIT 0.244141f
+#define MMC5983MA_SENS_UT_PER_LSB_18BIT 0.061035f
+
 /* ═══════════════════════════════════════════════════
  *  枚举
  * ═══════════════════════════════════════════════════ */
