@@ -12,23 +12,18 @@
  *      Yaw   正 = 施加正偏航力矩 → 机头顺时针偏转 (俯视)
  *
  *  ┌───────────────────────────────────────────────────────────────┐
- *  │    指令            M1(RL,CW)  M2(FL,CCW)  M3(RR,CCW)  M4(FR,CW) │
+ *  │    指令            M1(RL,CCW) M2(FL,CW)  M3(RR,CW)  M4(FR,CCW) │
  *  │    ─────────────  ─────────  ──────────  ──────────  ────────── │
  *  │    油门 (↑)         +1          +1          +1          +1       │
  *  │    Roll (右倾+)     +1          +1          -1          -1       │
  *  │    Pitch (上仰+)    -1          +1          -1          +1       │
- *  │    Yaw  (CW+)       -1          +1          +1          -1       │
+ *  │    Yaw  (CW+)       +1          -1          -1          +1       │
  *  └───────────────────────────────────────────────────────────────┘
  *
  *  推导:
  *    Roll  正力矩: 右翼下沉 → 左侧电机推力更大 → M1+, M2+, M3-, M4-
  *    Pitch 正力矩: 机头上抬 → 前方电机推力更大 → M2+, M4+, M1-, M3-
- *    Yaw   正力矩: 机身 CW → CCW 电机反扭矩更大 → M2+, M3+, M1-, M4-
- *
- *  "正指令" 的物理含义:
- *      Roll  正 = 施加右倾力矩   → 右翼下沉
- *      Pitch 正 = 施加上仰力矩   → 机头上抬
- *      Yaw   正 = 施加 CW 力矩  → 机头顺时针偏转 (俯视)
+ *    Yaw   正力矩: 机身 CW → CCW 电机反扭矩更大 → M1+, M4+, M2-, M3-
  *
  * ============================================================================
  *  误差四元数计算
@@ -87,15 +82,15 @@
  *  硬件映射 (修改此处即可适配不同飞控板)
  *
  *  TIM3 通道 → 电机:
- *      CCR1 → M1 (后左 RL, CW)
- *      CCR2 → M2 (前左 FL, CCW)
- *      CCR3 → M3 (后右 RR, CCW)
- *      CCR4 → M4 (前右 FR, CW)
+ *      CCR1 → M1 (后左 RL, CCW)
+ *      CCR2 → M2 (前左 FL, CW)
+ *      CCR3 → M3 (后右 RR, CW)
+ *      CCR4 → M4 (前右 FR, CCW)
  */
-#define MOTOR1_CCR TIM3->CCR1 /* M1: 后左 RL, CW  */
-#define MOTOR2_CCR TIM3->CCR2 /* M2: 前左 FL, CCW */
-#define MOTOR3_CCR TIM3->CCR3 /* M3: 后右 RR, CCW */
-#define MOTOR4_CCR TIM3->CCR4 /* M4: 前右 FR, CW  */
+#define MOTOR1_CCR TIM3->CCR2 /* M1: 后左 RL, CCW  */
+#define MOTOR2_CCR TIM3->CCR3 /* M2: 前左 FL, CW */
+#define MOTOR3_CCR TIM3->CCR1 /* M3: 后右 RR, CW */
+#define MOTOR4_CCR TIM3->CCR4 /* M4: 前右 FR, CCW  */
 
 /** @brief 电机索引 */
 enum {
@@ -507,22 +502,22 @@ void ControlMotor_Loop(void) {
     /*
      * FRD X 型四旋翼混控:
      *
-     *              M1(RL,CW)  M2(FL,CCW)  M3(RR,CCW)  M4(FR,CW)
+     *              M1(RL,CCW) M2(FL,CW)  M3(RR,CW)  M4(FR,CCW)
      * 油门 (↑)      +1          +1          +1          +1
      * Roll  (右倾+) +1          +1          -1          -1
      * Pitch (上仰+) -1          +1          -1          +1
-     * Yaw   (CW+)   -1          +1          +1          -1
+     * Yaw   (CW+)   +1          -1          -1          +1
      *
      * 推导:
      *   Roll  正力矩: 右翼下沉 → 左侧电机推力更大 → M1+, M2+, M3-, M4-
      *   Pitch 正力矩: 机头上抬 → 前方电机推力更大 → M2+, M4+, M1-, M3-
-     *   Yaw   正力矩: 机身 CW → CCW 电机推力更大 → M2+, M3+, M1-, M4-
+     *   Yaw   正力矩: 机身 CW → CCW 电机反扭矩更大 → M1+, M4+, M2-, M3-
      */
     float m[MOTOR_COUNT];
-    m[MOTOR_RL] = throttle + rollCtrl - pitchCtrl - yawCtrl;
-    m[MOTOR_FL] = throttle + rollCtrl + pitchCtrl + yawCtrl;
-    m[MOTOR_RR] = throttle - rollCtrl - pitchCtrl + yawCtrl;
-    m[MOTOR_FR] = throttle - rollCtrl + pitchCtrl - yawCtrl;
+    m[MOTOR_RL] = throttle + rollCtrl - pitchCtrl + yawCtrl;
+    m[MOTOR_FL] = throttle + rollCtrl + pitchCtrl - yawCtrl;
+    m[MOTOR_RR] = throttle - rollCtrl - pitchCtrl - yawCtrl;
+    m[MOTOR_FR] = throttle - rollCtrl + pitchCtrl + yawCtrl;
 
     /* ── 5. 输出限幅 ──────────────────────────────── */
     /* 比例限幅: 保持差动指令比例, 避免截断导致姿态失控 */
@@ -532,20 +527,6 @@ void ControlMotor_Loop(void) {
             m_min = m[i];
         if (m[i] > m_max)
             m_max = m[i];
-    }
-
-    /* 下溢保护: 将最低电机拉到 0% */
-    if (m_min < 0.0f) {
-        float shift = -m_min;
-        for (int i = 0; i < MOTOR_COUNT; i++)
-            m[i] += shift;
-    }
-
-    /* 上溢保护: 将最高电机压到 100% */
-    if (m_max > 100.0f) {
-        float shift = m_max - 100.0f;
-        for (int i = 0; i < MOTOR_COUNT; i++)
-            m[i] -= shift;
     }
 
     /* 最终安全钳位 */
@@ -593,12 +574,12 @@ void Control_Init(void) {
     PID_Init(&pidHeight, 10.0f, 1.0f, 6.0f, -15.0f, 15.0f, 0.02f, -40.0f, 40.0f, 1.0f);
     PID_Init(&pidRoll, 4.0f, 0.01f, 0.0f, -20.0f, 20.0f, 0.02f, -100.0f, 100.0f, 1.0f);
     PID_Init(&pidPitch, 4.0f, 0.01f, 0.0f, -20.0f, 20.0f, 0.02f, -100.0f, 100.0f, 1.0f);
-    PID_Init(&pidYaw, 2.0f, 0.01f, 0.0f, -20.0f, 20.0f, 0.02f, -100.0f, 100.0f, 1.0f);
+    PID_Init(&pidYaw, 1.2f, 0.01f, 0.0f, -20.0f, 20.0f, 0.02f, -100.0f, 100.0f, 1.0f);
 
     /* 速率环 (输出混控指令) */
-    PID_Init(&pidRateRoll, 0.4f, 0.3f, 0.008f, -20.0f, 20.0f, 0.01f, -100.0f, 100.0f, 1.0f);
-    PID_Init(&pidRatePitch, 0.4f, 0.3f, 0.008f, -20.0f, 20.0f, 0.01f, -100.0f, 100.0f, 1.0f);
-    PID_Init(&pidRateYaw, 0.1f, 0.05f, 0.0f, -20.0f, 20.0f, 0.01f, -100.0f, 100.0f, 1.0f);
+    PID_Init(&pidRateRoll, 0.4f, 0.15f, 0.015f, -20.0f, 20.0f, 0.01f, -100.0f, 100.0f, 1.0f);
+    PID_Init(&pidRatePitch, 0.4f, 0.15f, 0.015f, -20.0f, 20.0f, 0.01f, -100.0f, 100.0f, 1.0f);
+    PID_Init(&pidRateYaw, 0.08f, 0.03f, 0.0f, -20.0f, 20.0f, 0.01f, -100.0f, 100.0f, 1.0f);
 }
 
 /* ========================================================================== */
