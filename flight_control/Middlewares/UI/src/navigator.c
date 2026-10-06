@@ -274,17 +274,25 @@ void UI_Pid_Draw(UI_Widget* widget) {
         (rateSetYaw - gz)
     };
 
-    // 更新历史
-    if (pidErrorLen < w) {
-        for (int i = 0; i < 3; i++)
-            pidErrorHistory[i][pidErrorLen] = errors[i];
-        pidErrorLen++;
-    } else {
-        // 左移一格
-        for (int i = 0; i < 3; i++)
-            memmove(&pidErrorHistory[i][0], &pidErrorHistory[i][1], (w - 1) * sizeof(float));
-        for (int i = 0; i < 3; i++)
-            pidErrorHistory[i][w - 1] = errors[i];
+    /*
+     * 更新历史 — 每 8 帧采一点: 200Hz/8 = 25Hz 采样, 124 列 ≈ 5s 窗口。
+     * 原来每帧一列只有 0.6s 窗口, 0.2~2Hz 的慢摆在屏上看不出来,
+     * 25Hz 采样可分辨 ≤12Hz 的摆动 (足够覆盖姿态环/延迟振荡)
+     */
+    static uint8_t decim = 0;
+    if (++decim >= 8) {
+        decim = 0;
+        if (pidErrorLen < w) {
+            for (int i = 0; i < 3; i++)
+                pidErrorHistory[i][pidErrorLen] = errors[i];
+            pidErrorLen++;
+        } else {
+            // 左移一格
+            for (int i = 0; i < 3; i++)
+                memmove(&pidErrorHistory[i][0], &pidErrorHistory[i][1], (w - 1) * sizeof(float));
+            for (int i = 0; i < 3; i++)
+                pidErrorHistory[i][w - 1] = errors[i];
+        }
     }
 
     static float globalScale = 0.1f; // 初始可视化幅度（单位与误差一致）

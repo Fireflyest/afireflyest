@@ -43,12 +43,12 @@
  *
  *      ┌──────────────┐    rateSetpoint    ┌──────────────┐    motorCmd
  *      │  外环 (姿态)  │ ───────────────→  │  内环 (速率)  │ ──────────→ 混控器
- *      │  ATT_HZ=200  │   deg/s           │  RATE_HZ=500 │   (deg/s)
+ *      │  主循环同帧   │   deg/s           │  同帧顺序执行  │   (deg/s)
  *      └──────────────┘                    └──────────────┘
  *
  *  外环: 目标角度 vs 当前角度 → PID → 速率设定点 (deg/s)
  *  内环: 速率设定点 vs 陀螺仪  → PID → 电机混控指令
- *  跨核通信: 通过 volatile 共享变量 + __disable_irq 保护
+ *  同线程: 主循环同帧顺序调用, 共享变量 volatile + __disable_irq 兑底
  */
 
 #ifndef CONTROL_H
@@ -66,8 +66,8 @@ extern "C" {
 /*  环路频率                                                                   */
 /* ========================================================================== */
 
-#define ATTITUDE_LOOP_HZ 200 /**< 外环 (姿态) 调用频率 (Hz) */
-#define RATE_LOOP_HZ 500     /**< 内环 (速率) 调用频率 (Hz) */
+#define ATTITUDE_LOOP_HZ 200 /**< 外环标称 (主循环 5ms 帧); 正常用 FPS 实测 dt, 此值仅兑底 */
+#define RATE_LOOP_HZ 200     /**< 内环与外环同帧执行, 实测 dt */
 
 /* ========================================================================== */
 /*  控制模式                                                                   */
@@ -125,6 +125,7 @@ extern __IO float rateSetRoll;  /**< Roll  速率设定点 (deg/s) */
 extern __IO float rateSetPitch; /**< Pitch 速率设定点 (deg/s) */
 extern __IO float rateSetYaw;   /**< Yaw   速率设定点 (deg/s) */
 extern __IO float thrustOutput; /**< 油门输出 (0~100%)        */
+extern __IO float rateCmdRoll;  /**< Roll 速率环输出 (混控前, 诊断遥测 0x04) */
 
 /* ========================================================================== */
 /*  生命周期                                                                   */
@@ -147,7 +148,7 @@ void ControlAttitude_Loop(void);
 
 /**
  * @brief 内环 — 速率控制 + 电机混控
- * @note  由 TIM4 中断以 RATE_LOOP_HZ 频率调用
+ * @note  与外环同帧在主循环顺序调用 (不再挂 TIM4), 用实测 dt
  *
  * 流程: 读陀螺仪 → 速率环 PID → 混控 → 写入电机 PWM
  */
@@ -187,6 +188,24 @@ int8_t Control_Disarm(void);
 
 /** @brief 紧急停止 (立即锁定, 忽略状态检查) */
 void Control_EmergencyStop(void);
+
+/**
+ * @brief Roll 开环阶跃测试 (诊断): 固定差动输出 N 帧, 旁路速率环
+ * @param cmd    混控差动指令 (建议 5~10 起步, 内部钳位 ±20)
+ * @param frames 持续帧数 (0 = 提前结束; 上限 400 帧 = 2s @200Hz)
+ * @return 0=已启动/已取消, -1=未解锁 (电机未转, 测了也白测)
+ * @note  配合遥测 0x04 (rollCmd 阶跃 vs gx 响应) 读执行机构延迟、
+ *        上升时间与死区; 结束后自动复位 roll 角度/速率 PID。
+ *        测试期间飞行器会开环滚转 — 手持/系留 + 小幅度短时！
+ */
+int8_t Control_RollOpenLoopTest(float cmd, uint16_t frames);
+
+/** @brief 摆动周期 (ms): 滤波后 gx 过零测得; >2s 无过零返回 0 (未在摆) */
+uint16_t Control_GetOscPeriodMs(void);
+/** @brief 摆幅: errRoll 峰峰值 (0.1° 单位), 统计窗口 ≥1.5s 自动重开 */
+uint16_t Control_GetOscAmpDeciDeg(void);
+/** @brief 电机是否触轨 (0/100 鉳位发生过); 读取即清零 */
+uint8_t Control_TakeMotorSat(void);
 
 /* ========================================================================== */
 /*  飞行操作                                                                   */

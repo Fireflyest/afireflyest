@@ -16,13 +16,13 @@
  *  │    ─────────────  ─────────  ──────────  ──────────  ────────── │
  *  │    油门 (↑)         +1          +1          +1          +1       │
  *  │    Roll (右倾+)     +1          +1          -1          -1       │
- *  │    Pitch (上仰+)    -1          +1          -1          +1       │
+ *  │    Pitch (上仰+)    +1          -1          +1          -1       │
  *  │    Yaw  (CW+)       +1          -1          -1          +1       │
  *  └───────────────────────────────────────────────────────────────┘
  *
- *  推导:
+ *  推导 (含实机调参的俯仰反号):
  *    Roll  正力矩: 右翼下沉 → 左侧电机推力更大 → M1+, M2+, M3-, M4-
- *    Pitch 正力矩: 机头上抬 → 前方电机推力更大 → M2+, M4+, M1-, M3-
+ *    Pitch 正力矩: 机头上抬 → 后方电机推力更大 → M1+, M3+, M2-, M4-
  *    Yaw   正力矩: 机身 CW → CCW 电机反扭矩更大 → M1+, M4+, M2-, M3-
  *
  * ============================================================================
@@ -42,11 +42,23 @@
 #include <math.h>
 #include <string.h>
 #include "control.h"
+#include "fps.h"
+#include "lowpass.h"
 #include "pwm.h"
 
 /* ========================================================================== */
 /*  Section 0: 配置常量                                                        */
 /* ========================================================================== */
+
+/**
+ * @brief 速率环陀螺一阶低通时间常数 (s), 0 = 关闭
+ *
+ * 0.004 ≈ 40Hz 截止, 滞后 ≈ 4ms。作用: GYR ODR 提到 800Hz 后,
+ * 振动噪声带宽变宽, 不能让全带宽噪声 × Kp 直接进混控。
+ * A/B 实验: 设 0 对比有无滤波; 摆动是 100Hz 以上抖动就加大到 0.008。
+ * 注意: 加大 tau = 加相位滞后, 会压低可稳定带宽, 与调参互相牵制。
+ */
+#define RATE_GYRO_LPF_TAU 0.004f
 
 /** @brief 沸门死区 (%) */
 #define THROTTLE_DEADBAND 2.0f
@@ -87,10 +99,10 @@
  *      CCR3 → M3 (后右 RR, CW)
  *      CCR4 → M4 (前右 FR, CCW)
  */
-#define MOTOR1_CCR TIM3->CCR2 /* M1: 后左 RL, CCW  */
-#define MOTOR2_CCR TIM3->CCR3 /* M2: 前左 FL, CW */
-#define MOTOR3_CCR TIM3->CCR1 /* M3: 后右 RR, CW */
-#define MOTOR4_CCR TIM3->CCR4 /* M4: 前右 FR, CCW  */
+#define MOTOR1_CCR TIM3->CCR4 /* M1: 后左 RL, CCW  */
+#define MOTOR2_CCR TIM3->CCR1 /* M2: 前左 FL, CW */
+#define MOTOR3_CCR TIM3->CCR3 /* M3: 后右 RR, CW */
+#define MOTOR4_CCR TIM3->CCR2 /* M4: 前右 FR, CCW  */
 
 /** @brief 电机索引 */
 enum {
@@ -138,6 +150,7 @@ __IO float rateSetRoll = 0.0f;
 __IO float rateSetPitch = 0.0f;
 __IO float rateSetYaw = 0.0f;
 __IO float thrustOutput = 0.0f;
+__IO float rateCmdRoll = 0.0f; /* 速率环输出 (混控前), 诊断遥测 0x04 */
 
 /* ========================================================================== */
 /*  Section 3: 内部状态                                                        */
@@ -146,6 +159,24 @@ __IO float thrustOutput = 0.0f;
 static ControlMode_t curMode = CONTROL_MODE_DIRECT;
 static FlightPhase_t curPhase = FLIGHT_PHASE_GROUNDED;
 static volatile uint8_t isArmed = 0;
+
+/* 速率环陀螺低通状态 (rad/s); 首帧/复位后由 rateGyroLpfSynced 同步 */
+static LowPass_Filter_t rateGyroLpf[3];
+static uint8_t rateGyroLpfSynced = 0;
+
+/* 0x1B 开环阶跃测试 (旁路速率环, 量执行机构响应) */
+static float olTestCmd = 0.0f;
+static uint16_t olTestFrames = 0;
+
+/* 摆动诊断统计 (遥测 0x01 远程读取, 不依赖屏幕) */
+static uint16_t oscPeriodMs = 0;      /* gx 同向过零测得的摆动周期 */
+static uint32_t oscLastCrossTick = 0; /* 上一次同向过零时刻 (算周期) */
+static uint32_t oscLastSeenTick = 0;  /* 最近一次过零时刻 (超时判停) */
+static float oscLastErr = 0.0f;       /* errRoll 最近值 (窗口重开用) */
+static float oscAmpMin = 0.0f;
+static float oscAmpMax = 0.0f;
+static uint32_t oscAmpWinStart = 0;
+static uint8_t motorSatFlag = 0;      /* 电机 0/100 触轨标志 */
 
 static float baseHeight = 0.0f;   /**< 起飞基准高度 (m)       */
 static float targetRoll = 0.0f;   /**< 目标 Roll  (°)         */
@@ -256,6 +287,8 @@ static float NormalizeAngle(float a) {
 
 /** @brief 重置所有 PID 积分和微分状态 */
 static void ResetAllPIDs(void) {
+    rateGyroLpfSynced = 0; /* 重新同步陀螺低通, 避免解锁/切模式瞬间突跳 */
+    olTestFrames = 0;      /* 取消未完成的开环阶跃测试 */
     PID_Reset(&pidRoll);
     PID_Reset(&pidPitch);
     PID_Reset(&pidYaw);
@@ -286,6 +319,7 @@ static void StopMotors(void) {
     rateSetRoll = 0.0f;
     rateSetPitch = 0.0f;
     rateSetYaw = 0.0f;
+    rateCmdRoll = 0.0f;
     __enable_irq();
 
     Motor_Stop();
@@ -312,7 +346,10 @@ void ControlAttitude_Loop(void) {
         return;
     }
 
-    const float dt = 1.0f / (float)ATTITUDE_LOOP_HZ;
+    /* 实测帧间隔: 主循环受阻塞时会低于标称 100Hz, 勿写死 1/Hz */
+    float dt = FPS_GetDeltaTime();
+    if (!(dt > 0.0f) || dt > 0.1f)
+        dt = 1.0f / (float)ATTITUDE_LOOP_HZ;
 
     /* ── 1. 读取当前姿态 ─────────────────────────── */
     sm_quat_t curQuat;
@@ -367,9 +404,15 @@ void ControlAttitude_Loop(void) {
         else
             rampedHeight = targetHeight;
 
-        /* 高度 PID (前馈: baseThrottle, 反馈: PID 修正) */
+        /*
+         * 高度 PID (前馈: baseThrottle, 反馈: PID 修正)
+         * D 项用 EKF 垂直速度 (m/s, 向上为正) 而非对高度数值微分:
+         *   D = -kd * velZ, 与差分形式同号, 但经 EKF 滤波、无量化噪声
+         */
+        float velZ;
+        Attitude_GetVelocityZ(&velZ);
         thrustOutput = baseThrottle +
-                       PID_Update(&pidHeight, rampedHeight, curHeight, dt);
+                       PID_UpdateWithDeriv(&pidHeight, rampedHeight, curHeight, velZ, dt);
         thrustOutput = fmaxf(0.0f, fminf(thrustOutput, 100.0f));
     }
 
@@ -426,8 +469,18 @@ void ControlAttitude_Loop(void) {
     float errRoll_rad, errPitch_rad, errYaw_rad;
     quat_to_euler(qErr, &errRoll_rad, &errPitch_rad, &errYaw_rad);
     float errRoll = errRoll_rad * RAD2DEG;
+
+    /* 摆幅窗口: errRoll 峰峰值 (首帧以当前值开窗) */
+    if (oscAmpWinStart == 0) {
+        oscAmpMin = oscAmpMax = errRoll;
+        oscAmpWinStart = systemTick;
+    }
+    if (errRoll < oscAmpMin) oscAmpMin = errRoll;
+    if (errRoll > oscAmpMax) oscAmpMax = errRoll;
+    oscLastErr = errRoll;
     float errPitch = errPitch_rad * RAD2DEG;
     float errYaw = errYaw_rad * RAD2DEG;
+    (void)errYaw;
 
     /* 万向锁保护: 大俯仰角时 Yaw/Roll 耦合, 禁用 Yaw 修正 */
     float sinPitch = 2.0f * (curQuat[0] * curQuat[2] - curQuat[1] * curQuat[3]);
@@ -443,7 +496,7 @@ void ControlAttitude_Loop(void) {
      */
     float newRateSetRoll = PID_Update(&pidRoll, 0.0f, errRoll, dt);
     float newRateSetPitch = PID_Update(&pidPitch, 0.0f, errPitch, dt);
-    float newRateSetYaw = PID_Update(&pidYaw, 0.0f, errYaw, dt);
+    float newRateSetYaw = 0.0f;
 
     /* 原子写入共享变量 */
     __disable_irq();
@@ -458,10 +511,10 @@ void ControlAttitude_Loop(void) {
 /* ========================================================================== */
 
 /**
- * @brief 内环主函数 (TIM4 中断, 500 Hz)
+ * @brief 内环主函数 — 与外环同帧在主循环顺序调用 (不再挂 TIM4)
  *
  * 流程:
- *   1. 原子读取外环输出的速率设定点
+ *   1. 读取外环输出的速率设定点
  *   2. 读取陀螺仪实际角速度
  *   3. 速率环 PID → 混控指令
  *   4. 混控器: 油门 + Roll/Pitch/Yaw 分配到四个电机
@@ -473,28 +526,81 @@ void ControlMotor_Loop(void) {
         return;
     }
 
-    const float dt = 1.0f / (float)RATE_LOOP_HZ;
+    /* 与外环同帧执行: 用同一帧 dt, 保证 rateSet/gx 新鲜一致 */
+    float dt = FPS_GetDeltaTime();
+    if (!(dt > 0.0f) || dt > 0.1f)
+        dt = 1.0f / (float)RATE_LOOP_HZ;
 
-    /* ── 1. 原子读取速率设定点 ────────────────────── */
-    float localRateSetRoll, localRateSetPitch, localRateSetYaw;
-    __disable_irq();
-    localRateSetRoll = rateSetRoll;
-    localRateSetPitch = rateSetPitch;
-    localRateSetYaw = rateSetYaw;
-    __enable_irq();
+    /* ── 1. 速率设定点 ───────────────────────────── */
+    float localRateSetRoll = rateSetRoll;
+    float localRateSetPitch = rateSetPitch;
 
-    /* ── 2. 读取陀螺仪 (rad/s → deg/s) ───────────── */
+    /* ── 2. 读取陀螺仪 + 速率反馈低通 (rad/s) ────── */
     sm_vec3_t gyro;
     Attitude_GetGyro(gyro); /* bias 已补偿 */
 
-    float gx = gyro[0] * RAD2DEG; /* Roll  rate (deg/s) */
-    float gy = gyro[1] * RAD2DEG; /* Pitch rate (deg/s) */
-    float gz = gyro[2] * RAD2DEG; /* Yaw   rate (deg/s) */
+    /*
+     * 速率反馈一阶低通 (RATE_GYRO_LPF_TAU):
+     * 首帧同步状态避免解锁瞬间突跳; tau=0 时仅同步不滤波
+     */
+    if (!rateGyroLpfSynced) {
+        for (int i = 0; i < 3; i++)
+            rateGyroLpf[i].output = gyro[i];
+        rateGyroLpfSynced = 1;
+    }
+    if (RATE_GYRO_LPF_TAU > 0.0f) {
+        for (int i = 0; i < 3; i++)
+            LowPass_UpdateWithTau(&rateGyroLpf[i], gyro[i], RATE_GYRO_LPF_TAU, dt);
+    }
 
-    /* ── 3. 速率环 PID ───────────────────────────── */
-    float rollCtrl = PID_Update(&pidRateRoll, localRateSetRoll, gx, dt);
+    float gx = rateGyroLpf[0].output * RAD2DEG; /* Roll rate (deg/s) */
+    float gy = rateGyroLpf[1].output * RAD2DEG; /* Pitch rate (deg/s) */
+
+    /*
+     * 摆动周期测量: 滤波后 gx 过零 (滞回 ±2 deg/s 防噪声反复触发)。
+     * 连续两次同向过零 = 一个完整周期 → oscPeriodMs。
+     */
+    {
+        static float lastGx = 0.0f;
+        static uint8_t lastDir = 0;
+        const float HYST = 2.0f;
+        uint8_t dir = 0;
+
+        if (lastGx > HYST && gx <= -HYST)
+            dir = 1;
+        else if (lastGx < -HYST && gx >= HYST)
+            dir = 2;
+
+        if (dir != 0) {
+            uint32_t now = systemTick;
+            if (dir == lastDir && oscLastCrossTick != 0) {
+                uint32_t p = now - oscLastCrossTick;
+                if (p >= 50u && p <= 5000u) /* 0.2 ~ 20 Hz */
+                    oscPeriodMs = (uint16_t)p;
+            }
+            oscLastCrossTick = now;
+            oscLastSeenTick = now;
+            lastDir = dir;
+        }
+        lastGx = gx;
+    }
+
+    /* ── 3. 速率环 PID (或 0x1B 开环阶跃测试) ────── */
+    float rollCtrl;
+    if (olTestFrames > 0) {
+        /* 旁路速率环, 固定输出 → 0x04 看 rollCmd→gx 阶跃响应 */
+        rollCtrl = olTestCmd;
+        if (--olTestFrames == 0) {
+            PID_Reset(&pidRoll);    /* 开环期间角度环积分白绕, 结束后清 */
+            PID_Reset(&pidRateRoll);
+        }
+    } else {
+        rollCtrl = PID_Update(&pidRateRoll, localRateSetRoll, gx, dt);
+    }
+    rateCmdRoll = rollCtrl; /* 诊断遥测 0x04: 阶跃 vs gx 响应 → 量执行机构延迟 */
+    /* yaw 暂停 */
     float pitchCtrl = PID_Update(&pidRatePitch, localRateSetPitch, gy, dt);
-    float yawCtrl = PID_Update(&pidRateYaw, localRateSetYaw, gz, dt);
+    float yawCtrl = 0.0f;
 
     float throttle = thrustOutput;
 
@@ -505,33 +611,30 @@ void ControlMotor_Loop(void) {
      *              M1(RL,CCW) M2(FL,CW)  M3(RR,CW)  M4(FR,CCW)
      * 油门 (↑)      +1          +1          +1          +1
      * Roll  (右倾+) +1          +1          -1          -1
-     * Pitch (上仰+) -1          +1          -1          +1
+     * Pitch (上仰+) +1          -1          +1          -1   ← 实机调参取反
      * Yaw   (CW+)   +1          -1          -1          +1
      *
      * 推导:
      *   Roll  正力矩: 右翼下沉 → 左侧电机推力更大 → M1+, M2+, M3-, M4-
-     *   Pitch 正力矩: 机头上抬 → 前方电机推力更大 → M2+, M4+, M1-, M3-
+     *   Pitch 正力矩: 机头上抬 → 后方电机推力更大 → M1+, M3+, M2-, M4-
      *   Yaw   正力矩: 机身 CW → CCW 电机反扭矩更大 → M1+, M4+, M2-, M3-
+     *
+     * 俯仰符号说明:
+     *   实机自稳调试发现原方向相反, 此处对 pitch 差动取反;
+     *   若需恢复理论推导方向, 将 pitchCtrl 符号改回。
      */
     float m[MOTOR_COUNT];
-    m[MOTOR_RL] = throttle + rollCtrl - pitchCtrl + yawCtrl;
-    m[MOTOR_FL] = throttle + rollCtrl + pitchCtrl - yawCtrl;
-    m[MOTOR_RR] = throttle - rollCtrl - pitchCtrl - yawCtrl;
-    m[MOTOR_FR] = throttle - rollCtrl + pitchCtrl + yawCtrl;
+    m[MOTOR_RL] = throttle + rollCtrl + pitchCtrl + yawCtrl;
+    m[MOTOR_FL] = throttle + rollCtrl - pitchCtrl - yawCtrl;
+    m[MOTOR_RR] = throttle - rollCtrl + pitchCtrl - yawCtrl;
+    m[MOTOR_FR] = throttle - rollCtrl - pitchCtrl + yawCtrl;
 
-    /* ── 5. 输出限幅 ──────────────────────────────── */
-    /* 比例限幅: 保持差动指令比例, 避免截断导致姿态失控 */
-    float m_min = m[0], m_max = m[0];
-    for (int i = 1; i < MOTOR_COUNT; i++) {
-        if (m[i] < m_min)
-            m_min = m[i];
-        if (m[i] > m_max)
-            m_max = m[i];
-    }
-
-    /* 最终安全钳位 */
-    for (int i = 0; i < MOTOR_COUNT; i++)
+    /* PID 输出原样到电机; 仅钳位到 PWM 合法范围 */
+    for (int i = 0; i < MOTOR_COUNT; i++) {
+        if (m[i] < 0.0f || m[i] > 100.0f)
+            motorSatFlag = 1; /* 0/100 hard rail — the only clamp that stays */
         m[i] = fmaxf(0.0f, fminf(m[i], 100.0f));
+    }
 
     /* ── 6. 写入电机 ─────────────────────────────── */
     Motor_WriteAll(m);
@@ -542,44 +645,47 @@ void ControlMotor_Loop(void) {
 /* ========================================================================== */
 
 void Control_Init(void) {
-    /* ── TIM4 中断: 内环定时器 ────────────────────── */
-    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
+    /* 速率反馈低通: 滤波走 LowPass_UpdateWithTau, alpha 置 1.0 (不过滤) */
+    for (int i = 0; i < 3; i++)
+        LowPass_Filter_Init(&rateGyroLpf[i], 1.0f, 0.0f);
 
-    TIM_TimeBaseInitTypeDef TB;
-    uint32_t timer_clk = SystemCoreClock;
-    uint16_t presc = (uint16_t)(timer_clk / 1000000UL) - 1;
-    uint16_t period = (uint16_t)(1000000UL / RATE_LOOP_HZ) - 1;
-
-    TIM_TimeBaseStructInit(&TB);
-    TB.TIM_Prescaler = presc;
-    TB.TIM_CounterMode = TIM_CounterMode_Up;
-    TB.TIM_Period = period;
-    TB.TIM_ClockDivision = TIM_CKD_DIV1;
-    TIM_TimeBaseInit(TIM4, &TB);
-
-    TIM_ITConfig(TIM4, TIM_IT_Update, ENABLE);
-
-    NVIC_InitTypeDef NVIC_InitStructure;
-    NVIC_InitStructure.NVIC_IRQChannel = TIM4_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
-    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
-    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-    NVIC_Init(&NVIC_InitStructure);
-
-    TIM_Cmd(TIM4, ENABLE);
+    /*
+     * 内环不再挂 TIM4 中断。
+     * 原因: TIM4 ISR 与主循环并发读写 EKF/陀螺，且两边频率不一致，
+     * 反馈被撕裂 → 速率环输出抖振、平均力矩被对冲（自稳又弱又抖、
+     * 手扳却有力）。改为与外环同线程顺序执行，见 main.c。
+     */
 
     /* ── PID 参数 ─────────────────────────────────── */
-    /*                     Kp    Ki    Kd    OutMin  OutMax  Df   IntMin  IntMax  Scale */
-    /* 角度环 (输出 deg/s) */
-    PID_Init(&pidHeight, 10.0f, 1.0f, 6.0f, -15.0f, 15.0f, 0.02f, -40.0f, 40.0f, 1.0f);
-    PID_Init(&pidRoll, 4.0f, 0.01f, 0.0f, -20.0f, 20.0f, 0.02f, -100.0f, 100.0f, 1.0f);
-    PID_Init(&pidPitch, 4.0f, 0.01f, 0.0f, -20.0f, 20.0f, 0.02f, -100.0f, 100.0f, 1.0f);
-    PID_Init(&pidYaw, 1.2f, 0.01f, 0.0f, -20.0f, 20.0f, 0.02f, -100.0f, 100.0f, 1.0f);
+    /*
+     * PID_Init(kp, ki, kd, int_min, int_max, d_tau, out_min, out_max, aw_gain)
+     *
+     * 调参原则 (串级):
+     *   速率环先于角度环; 速率环带宽约 10~20 Hz, 角度环约 3~5 Hz
+     *   角度环 Kd=0 (阻尼交给速率环); Yaw 通常比 Roll/Pitch 软 2~3 倍
+     *   [调参期] 输出不限幅 (角度环 + 速率环):
+     *     原值 角度 ±40/±12 deg/s、混控差动 ±30/±15,
+     *     现用 PID_OUT_UNLIMITED 关闭, 最终兑底是混控后的电机 0~100 钳位
+     *   [调参期] 积分限幅保留 (角度 ±40/±12, 速率 ±30/±15):
+     *     输出不限幅后 anti-windup 无饱和可回灌, 积分只能靠 IntMin/IntMax
+     *     把守, 不要跟着放开; 调参收敛后建议收到输出限幅一半
+     *   高度环保留 ±15% 油门修正限幅 (油门安全), D 用 EKF 垂直速度
+     */
+    /*                         Kp     Ki     Kd    IntMin  IntMax  d_tau  OutMin  OutMax  aw */
+    /* 高度环 (输出: 油门修正 %, 前馈 baseThrottle) */
+    PID_Init(&pidHeight, 8.0f, 1.2f, 2.5f, -15.0f, 15.0f, 0.05f, -15.0f, 15.0f, 1.0f);
+    pidHeight.d_max = 10.0f; /* m/s: 拦 EKF 速度异常跳变 (原全局限幅 10000 对 m/s 无效) */
 
-    /* 速率环 (输出混控指令) */
-    PID_Init(&pidRateRoll, 0.4f, 0.15f, 0.015f, -20.0f, 20.0f, 0.01f, -100.0f, 100.0f, 1.0f);
-    PID_Init(&pidRatePitch, 0.4f, 0.15f, 0.015f, -20.0f, 20.0f, 0.01f, -100.0f, 100.0f, 1.0f);
-    PID_Init(&pidRateYaw, 0.08f, 0.03f, 0.0f, -20.0f, 20.0f, 0.01f, -100.0f, 100.0f, 1.0f);
+    /* 滚转: Ki 0.40 过冲 → 收到 0.15; IntMax 同步收 */
+    PID_Init(&pidRoll, 2.9f, 0.03f, 0.0f, -40.0f, 40.0f, 0.03f, -PID_OUT_UNLIMITED, PID_OUT_UNLIMITED, 1.0f);
+    /* Pitch 复制 Roll 参数 (单轴 pitch 测试) */
+    PID_Init(&pidPitch, 2.9f, 0.03f, 0.0f, -40.0f, 40.0f, 0.03f, -PID_OUT_UNLIMITED, PID_OUT_UNLIMITED, 1.0f);
+    PID_Init(&pidYaw, 1.5f, 0.05f, 0.0f, -12.0f, 12.0f, 0.02f, -PID_OUT_UNLIMITED, PID_OUT_UNLIMITED, 1.0f);
+
+    PID_Init(&pidRateRoll, 0.32f, 0.005f, 0.0f, -30.0f, 30.0f, 0.02f, -PID_OUT_UNLIMITED, PID_OUT_UNLIMITED, 1.0f);
+    /* Pitch 复制 Roll 参数 (单轴 pitch 测试) */
+    PID_Init(&pidRatePitch, 0.32f, 0.005f, 0.0f, -30.0f, 30.0f, 0.02f, -PID_OUT_UNLIMITED, PID_OUT_UNLIMITED, 1.0f);
+    PID_Init(&pidRateYaw, 0.15f, 0.05f, 0.0f, -15.0f, 15.0f, 0.01f, -PID_OUT_UNLIMITED, PID_OUT_UNLIMITED, 1.0f);
 }
 
 /* ========================================================================== */
@@ -731,6 +837,54 @@ void Control_Hover(void) {
 /* ========================================================================== */
 /*  Section 12: 指令输入                                                       */
 /* ========================================================================== */
+
+/* ── 摆动诊断 (遥测 0x01 远程读取) ────────────── */
+
+uint16_t Control_GetOscPeriodMs(void) {
+    /* >2s 无过零 → 认为未在摆 (或已停止), 报 0 */
+    if (oscPeriodMs == 0 || (uint32_t)(systemTick - oscLastSeenTick) > 2000u)
+        return 0;
+    return oscPeriodMs;
+}
+
+uint16_t Control_GetOscAmpDeciDeg(void) {
+    float pp = (oscAmpMax - oscAmpMin) * 10.0f; /* 0.1° 单位 */
+    if (pp < 0.0f) pp = 0.0f;
+    if (pp > 60000.0f) pp = 60000.0f;
+    uint16_t v = (uint16_t)pp;
+
+    /* 窗口 ≥1.5s 才重开: 0.7Hz 以下慢摆也能覆盖至少一个周期 */
+    if ((uint32_t)(systemTick - oscAmpWinStart) >= 1500u) {
+        oscAmpMin = oscAmpMax = oscLastErr;
+        oscAmpWinStart = systemTick;
+    }
+    return v;
+}
+
+uint8_t Control_TakeMotorSat(void) {
+    uint8_t v = motorSatFlag;
+    motorSatFlag = 0;
+    return v;
+}
+
+int8_t Control_RollOpenLoopTest(float cmd, uint16_t frames) {
+    if (!isArmed)
+        return -1; /* 未解锁时电机不转, 测不出响应 */
+
+    if (frames == 0) {
+        olTestFrames = 0; /* 提前结束 */
+        return 0;
+    }
+
+    /* 安全钳位: 差动 ±20 (叠加在油门上仍会饱和), 最长 400 帧 */
+    if (cmd >  20.0f) cmd =  20.0f;
+    if (cmd < -20.0f) cmd = -20.0f;
+    if (frames > 400) frames = 400;
+
+    olTestCmd = cmd;
+    olTestFrames = frames;
+    return 0;
+}
 
 void Control_SetThrottle(float throttle) {
     if (!isArmed) {

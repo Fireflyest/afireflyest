@@ -1,0 +1,9 @@
+{
+    "targetSet": {
+        "afireflyest": {
+            "activeTargetType": "STM32F401RCTx"
+        }
+    },
+    "activeSolution": "../afireflyest.csolution.yml",
+    "activeTarget": "STM32F401RCTx"
+}

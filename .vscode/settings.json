@@ -25,7 +25,7 @@
         "C:/Users/frostTide/AppData/Local/arm/packs/ARM/CMSIS/6.3.0/CMSIS/Core/Include",
         "C:/Users/frostTide/AppData/Local/arm/packs/ARM/CMSIS-DSP/1.11.0/Include"
     ],
-    "C_Cpp.default.compilerPath": "E:/Arm/GNU Toolchain mingw-w64-i686-arm-none-eabi/bin/arm-none-eabi-gcc.exe",
+    "C_Cpp.default.compilerPath": "E:/Arm/Arm GNU Toolchain arm-none-eabi/14.3 rel1/bin/arm-none-eabi-gcc.exe",
     "C_Cpp.default.intelliSenseMode": "windows-gcc-arm",
     "C_Cpp.default.defines": [
         "STM32F401xx"
@@ -35,5 +35,13 @@
         "-mfloat-abi=hard",
         "-mfpu=fpv4-sp-d16"
     ],
-    "cmsis-csolution.autoDebugLaunch": false
+    "cmsis-csolution.autoDebugLaunch": false,
+    "memory-inspector.addressPadding": "32bit",
+    "memory-inspector.groupings.groupsPerRow": "Autofit",
+    "memory-inspector.groupings.MAUsPerGroup": 4,
+    "memory-inspector.scrollingBehavior": "Auto-Append",
+    "cmake.sourceDirectory": "E:/projects/hardware/afireflyest/tmp/STM32F401RCTx/default",
+    "clangd.arguments": [
+        "--compile-commands-dir=e:\\projects\\hardware\\afireflyest\\out\\flight_control\\STM32F401RCTx\\Debug"
+    ]
 }

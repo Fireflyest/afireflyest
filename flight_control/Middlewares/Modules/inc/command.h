@@ -23,6 +23,7 @@ typedef enum {
     CMD_TYPE_CONTROL_TAKEOFF      = 0x18,   /* 起飞（带高度参数）  */
     CMD_TYPE_CONTROL_LAND         = 0x19,   /* 降落             */
     CMD_TYPE_CONTROL_HOVER        = 0x1A,   /* 悬停             */
+    CMD_TYPE_CONTROL_ROLLOL       = 0x1B,   /* Roll 开环阶跃测试 (量执行机构) */
 } CommandType_t;
 
 
@@ -57,5 +58,7 @@ void Command_SetTakeoffCallback(int8_t (*callback)(float relative_height));
 void Command_SetLandCallback(int8_t (*callback)(void));
 /** @brief  注册：悬停 () → void */
 void Command_SetHoverCallback(void (*callback)(void));
+/** @brief  注册：Roll 开环阶跃 (float cmd, uint16_t frames) → int8_t */
+void Command_SetRollOLCallback(int8_t (*callback)(float cmd, uint16_t frames));
 
 #endif /* __COMMAND_H */

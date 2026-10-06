@@ -881,8 +881,12 @@ bmi260_err_t BMI260_Init(bmi260_dev_t* dev) {
     uint8_t acc_data[2] = {0x28, 0x01};
     SPI_Sensor_WriteBytes(dev->sensor_id, BMI2_ACC_CONF_ADDR, acc_data, 2);
 
-    /* === 配置 GYR === */
-    uint8_t gyr_data[2] = {0x29, 0x00};
+    /* === 配置 GYR ===
+     * GYR_CONF 低 4 位 = ODR: 0x0B = 800Hz (原 0x09 = 200Hz)
+     * 控制回路 200Hz 且无数据就绪同步: ODR 等于回路频率时, 零阶保持 +
+     * 内部滤波群延迟 (5~10ms) 再加采样相位抖动, 直接吃掉速率环相位裕度,
+     * 表现为“换什么增益都在原地摆”。高位 0x20 保持原配置不变。 */
+    uint8_t gyr_data[2] = {0x2B, 0x00};
     SPI_Sensor_WriteBytes(dev->sensor_id, BMI2_GYR_CONF_ADDR, gyr_data, 2);
 
     /* === 使能传感器 === */

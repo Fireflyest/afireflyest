@@ -16,6 +16,7 @@ static void    (*cbEStop)(void)                   = NULL;
 static int8_t  (*cbTakeoff)(float)                = NULL;
 static int8_t  (*cbLand)(void)                    = NULL;
 static void    (*cbHover)(void)                   = NULL;
+static int8_t  (*cbRollOL)(float, uint16_t)       = NULL;
 
 /* ══════════════════════════════════════════════════════════════
  *  回调注册
@@ -76,6 +77,11 @@ void Command_SetHoverCallback(void (*cb)(void))
     cbHover = cb;
 }
 
+void Command_SetRollOLCallback(int8_t (*cb)(float cmd, uint16_t frames))
+{
+    cbRollOL = cb;
+}
+
 /* ══════════════════════════════════════════════════════════════
  *  小端序 float 读取（安全，不依赖对齐）
  * ══════════════════════════════════════════════════════════════ */
@@ -85,6 +91,11 @@ static float ReadFloat(const uint8_t* p)
     float f;
     memcpy(&f, p, sizeof(float));
     return f;
+}
+
+static uint16_t ReadU16(const uint8_t* p)
+{
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -105,6 +116,7 @@ static float ReadFloat(const uint8_t* p)
  *    0x18  [height: float]                     总长 5
  *    0x19  (无数据)                             总长 1
  *    0x1A  (无数据)                             总长 1
+ *    0x1B  [rollCmd: float] [frames: u16 LE]    总长 7
  * ══════════════════════════════════════════════════════════════ */
 
 uint8_t Command_ParseAndExecute(const uint8_t* data, uint16_t len)
@@ -193,6 +205,13 @@ uint8_t Command_ParseAndExecute(const uint8_t* data, uint16_t len)
         if (cbHover) {
             cbHover();
             return 0;
+        }
+        break;
+
+    /* ── Roll 开环阶跃测试: [rollCmd: float] [frames: u16] ── */
+    case CMD_TYPE_CONTROL_ROLLOL:
+        if (payloadLen >= 6 && cbRollOL) {
+            return (uint8_t)cbRollOL(ReadFloat(payload), ReadU16(payload + 4));
         }
         break;
 

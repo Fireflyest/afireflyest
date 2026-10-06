@@ -162,6 +162,7 @@ int main() {
     Command_SetTakeoffCallback(Control_Takeoff);
     Command_SetLandCallback(Control_Land);
     Command_SetHoverCallback(Control_Hover);
+    Command_SetRollOLCallback(Control_RollOpenLoopTest);
 
     Window_To(WINDOW_CUBE);
 
@@ -181,13 +182,16 @@ int main() {
         /* Should not reach here. */
 
         FPS_StartFrame();
-        
+
         float dt = FPS_GetDeltaTime();
-        Attitude_Update(dt);
 
         Key_Toggle_Handler();
         LED_Toggle_Handler();
 
+        /* 先读传感器，再更新姿态：
+         * 若先 Attitude_Update 则 EKF/速率环始终用上一帧旧数据，
+         * 200Hz 主循环 + 500Hz 速率环下会多约一帧 (5ms) 滞后，
+         * 相位裕度不足 → 回正过程抖振、稳态抖 */
         BMI260_ReadAccel(&bmi, &acc);
         BMI260_ReadGyro(&bmi, &gyr);
         memcpy(imu_rx_buf, &acc, 6);
@@ -206,9 +210,13 @@ int main() {
             sea_level_p);
         temperature_rx = baro_data.temperature_deg;
 
-        MMC5983MA_ReadMagRaw(&mmc, &mag_data);
-
-        {
+        /*
+         * 磁力计非阻塞轮询: 原 MMC5983MA_ReadMagRaw 每帧阻塞 ~11ms
+         * (SET 1ms + bw=00 测量 10ms 的 delay_ms 轮询), 主循环被拖到
+         * ~90Hz; 而 ATTITUDE_USE_MAG=0, 数据只喂 UI → 改为状态机
+         * 分摊, 有新数据才更新 mag_rx_buf, 否则保留上帧值 (~40Hz 出数)
+         */
+        if (MMC5983MA_ReadMagRawPoll(&mmc, &mag_data)) {
             int32_t x_centered = (int32_t)mag_data.x - (int32_t)MMC_NULL_FIELD_16BIT;
             int32_t y_centered = (int32_t)mag_data.y - (int32_t)MMC_NULL_FIELD_16BIT;
             int32_t z_centered = (int32_t)mag_data.z - (int32_t)MMC_NULL_FIELD_16BIT;
@@ -225,6 +233,8 @@ int main() {
             mag_rx_buf[4] = (uint8_t)(z & 0xFF);
             mag_rx_buf[5] = (uint8_t)((z >> 8) & 0xFF);
         }
+
+        Attitude_Update(dt);
 
 
 
@@ -286,6 +296,30 @@ int main() {
                 BLE_WriteData(att_buf, 32);
             }
 
+            /* 速率环诊断包 (类型 0x04), 每 2 帧 (100Hz):
+             * 实测陀螺速率 (deg/s, 与 0x02 的 rateSet 同量纲) + 速率环输出。
+             *   rateSet(0x02) vs gx(0x04) → 内环跟踪相位;
+             *   rollCmd(0x04) 阶跃 vs gx  → 执行机构延迟/上升时间 */
+            if (telemetry_tick % 2 == 0) {
+                uint8_t rate_buf[32] = {0};
+                rate_buf[0] = 0xAA;
+                rate_buf[1] = 0x04;
+
+                sm_vec3_t g;
+                Attitude_GetGyro(g);
+                float gdeg[3];
+                gdeg[0] = g[0] * 57.29577951f;
+                gdeg[1] = g[1] * 57.29577951f;
+                gdeg[2] = g[2] * 57.29577951f;
+                float rollCmd = rateCmdRoll;
+                memcpy(&rate_buf[2],  &gdeg[0], 4);
+                memcpy(&rate_buf[6],  &gdeg[1], 4);
+                memcpy(&rate_buf[10], &gdeg[2], 4);
+                memcpy(&rate_buf[14], &rollCmd, 4);
+
+                BLE_WriteData(rate_buf, 32);
+            }
+
             // GPS 包 (类型 0x03)，每 10 帧发送一次
             if (telemetry_tick % 10 == 0) {
                 uint8_t gps_buf[32] = {0};
@@ -344,7 +378,7 @@ int main() {
         }
 
         ControlAttitude_Loop();
-        // ControlMotor_Loop();
+        ControlMotor_Loop(); /* 与外环同线程顺序执行, 避免 TIM4 并发撕裂反馈 */
 
         // char pwm_status[64];
         // sprintf(pwm_status, "PWM: %d, %d, %d, %d\r\n", 

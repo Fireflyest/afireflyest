@@ -450,6 +450,20 @@ void Attitude_Update(float dt) {
 #else
         {
 #endif
+            /* 对准期间若在动, 丢弃进度重新采 — 否则初值 bias/姿态全错,
+             * EKF 带着假零位跑, 水平时 P 一直纠 → 单边电机常转 */
+            float gmag = sqrtf(gyro_rad[0] * gyro_rad[0] +
+                               gyro_rad[1] * gyro_rad[1] +
+                               gyro_rad[2] * gyro_rad[2]);
+            if (gmag > 0.05f) { /* >~3°/s 视为在动 */
+                align_count = 0;
+                align_mag_count = 0;
+                align_sum_ax = align_sum_ay = align_sum_az = 0;
+                align_sum_gx = align_sum_gy = align_sum_gz = 0;
+                align_sum_mx = align_sum_my = align_sum_mz = 0;
+                return;
+            }
+
             align_sum_ax += accel_ms2[0];
             align_sum_ay += accel_ms2[1];
             align_sum_az += accel_ms2[2];

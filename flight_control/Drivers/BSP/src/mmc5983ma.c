@@ -237,6 +237,57 @@ mmc5983ma_err_t MMC5983MA_ReadMagRaw(mmc5983ma_dev_t* dev,
     return MMC_OK;
 }
 
+/* ═══════════════════════════════════════════════════
+ *  非阻塞轮询式读取 (主循环每帧调用)
+ *
+ *  阻塞版每帧耗时 SET(1ms) + 测量等待 (bw=00 → 10ms, delay_ms 轮询)
+ *  ≈ 11ms, 会把主循环拖到 ~90Hz (控制周期变 11ms, 直接吃相位裕度);
+ *  而 ATTITUDE_USE_MAG=0 时这些数据只喂 UI。
+ *  状态机把 SET → TM_M → 等待 → 读 分摊到多次调用, 单次调用
+ *  ≤2 次单字节 SPI + (完成时) 一次 7 字节 burst, 全程无 delay。
+ * ═══════════════════════════════════════════════════ */
+
+typedef enum {
+    MAG_POLL_SET = 0, /* 发 SET (磁化 AMR 桥) */
+    MAG_POLL_TRIG,    /* 发 TM_M 触发本轮测量 */
+    MAG_POLL_WAIT,    /* 轮询 Meas_M_Done */
+} mag_poll_state_t;
+
+static mag_poll_state_t s_magPollState = MAG_POLL_SET;
+
+uint8_t MMC5983MA_ReadMagRawPoll(mmc5983ma_dev_t* dev,
+                                 mmc5983ma_raw_data_t* raw) {
+    if (!dev || !raw)
+        return 0;
+
+    switch (s_magPollState) {
+
+    case MAG_POLL_SET:
+        reg_write(dev, MMC_REG_CTRL0, 0x08); /* SET */
+        s_magPollState = MAG_POLL_TRIG;
+        return 0;
+
+    case MAG_POLL_TRIG:
+        /* SET 与 TM_M 分属相邻两次调用 → 间隔 ≥1 帧 (主循环节拍
+         * ≥ TARGET_FRAME_TIME=5ms), 等效原版 delay_ms(1) 且不阻塞 */
+        reg_write(dev, MMC_REG_CTRL0, MMC_CTRL0_TM_M);
+        s_magPollState = MAG_POLL_WAIT;
+        return 0;
+
+    case MAG_POLL_WAIT:
+    default:
+        if (!(reg_read(dev, MMC_REG_STATUS) & MMC_STATUS_MEAS_M_DONE))
+            return 0; /* 未完成, 下帧再问 (bw=00 约 10ms) */
+        {
+            uint8_t buf[7];
+            reg_read_burst(dev, MMC_REG_XOUT0, buf, 7);
+            parse_xyz_raw(buf, raw, dev->use_18bit);
+        }
+        s_magPollState = MAG_POLL_SET;
+        return 1;
+    }
+}
+
 mmc5983ma_err_t MMC5983MA_ReadMag(mmc5983ma_dev_t* dev,
                                   mmc5983ma_data_t* data) {
     mmc5983ma_raw_data_t raw;

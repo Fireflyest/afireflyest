@@ -142,6 +142,14 @@ mmc5983ma_err_t MMC5983MA_Set(mmc5983ma_dev_t* dev);
 mmc5983ma_err_t MMC5983MA_Reset(mmc5983ma_dev_t* dev);
 
 mmc5983ma_err_t MMC5983MA_ReadMagRaw(mmc5983ma_dev_t* dev, mmc5983ma_raw_data_t* raw);
+
+/**
+ * @brief 非阻塞轮询式磁场读取 — 主循环每帧调用
+ * @return 1 = raw 已更新为新一帧; 0 = 本轮无新数据 (调用方保留旧值)
+ * @note  SET → TM_M → 轮询完成 → burst 读分摊到多次调用, 单次只做
+ *       ≤2 次单字节 SPI, 无 delay_ms 阻塞。典型出数周期 ~25ms (bw=00)
+ */
+uint8_t MMC5983MA_ReadMagRawPoll(mmc5983ma_dev_t* dev, mmc5983ma_raw_data_t* raw);
 mmc5983ma_err_t MMC5983MA_ReadMag(mmc5983ma_dev_t* dev, mmc5983ma_data_t* data);
 mmc5983ma_err_t MMC5983MA_ReadTemp(mmc5983ma_dev_t* dev, float* temperature_c);
 
