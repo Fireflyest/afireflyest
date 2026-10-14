@@ -18,6 +18,7 @@ extern uint8_t esTxBuffer[ES_TX_BUFFER_SIZE];
 
 extern __IO uint16_t esRxIndexUart2;
 extern __IO uint8_t esRxStatusUart2;
+extern __IO uint16_t esUart2Err; /* 线路错误计数: 波特率不匹配/接线问题会持续增长 */
 
 void ExtraSensor_Init(uint32_t baudrate);
 

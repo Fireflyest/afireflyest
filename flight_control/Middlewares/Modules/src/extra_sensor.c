@@ -5,6 +5,7 @@ uint8_t esTxBuffer[ES_TX_BUFFER_SIZE];
 
 __IO uint16_t esRxIndexUart2;
 __IO uint8_t esRxStatusUart2;
+__IO uint16_t esUart2Err; /* USART2 线路错误计数 (FE 帧错/NE 噪声/ORE 溢出/PE 校验) */
 
 void ExtraSensor_Init(uint32_t baudrate) {
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_USART2, ENABLE);  // Enable USART2 clock
@@ -48,8 +49,16 @@ uint16_t ExtraSensor_ReadData(uint8_t* data) {
 }
 
 void ExtraSensor_WriteData(uint8_t* data, uint16_t size) {
-    if (size == 0)
+    if (!data || size == 0)
         return;
 
-    
+    /* 轮询发送 (不用 DMA/中断, 调用方频率低时足够) */
+    for (uint16_t i = 0; i < size; i++) {
+        while (USART_GetFlagStatus(USART2, USART_FLAG_TXE) == RESET)
+            ;
+        USART_SendData(USART2, (uint16_t)data[i]);
+    }
+    /* 等最后一字节真正发完, 否则连续调用会粘包 */
+    while (USART_GetFlagStatus(USART2, USART_FLAG_TC) == RESET)
+        ;
 }

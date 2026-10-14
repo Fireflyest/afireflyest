@@ -17,6 +17,7 @@ static int8_t  (*cbTakeoff)(float)                = NULL;
 static int8_t  (*cbLand)(void)                    = NULL;
 static void    (*cbHover)(void)                   = NULL;
 static int8_t  (*cbRollOL)(float, uint16_t)       = NULL;
+static int8_t  (*cbMagCal)(void)                  = NULL;
 
 /* ══════════════════════════════════════════════════════════════
  *  回调注册
@@ -82,6 +83,11 @@ void Command_SetRollOLCallback(int8_t (*cb)(float cmd, uint16_t frames))
     cbRollOL = cb;
 }
 
+void Command_SetMagCalibCallback(int8_t (*cb)(void))
+{
+    cbMagCal = cb;
+}
+
 /* ══════════════════════════════════════════════════════════════
  *  小端序 float 读取（安全，不依赖对齐）
  * ══════════════════════════════════════════════════════════════ */
@@ -117,6 +123,7 @@ static uint16_t ReadU16(const uint8_t* p)
  *    0x19  (无数据)                             总长 1
  *    0x1A  (无数据)                             总长 1
  *    0x1B  [rollCmd: float] [frames: u16 LE]    总长 7
+ *    0x1C  (无数据)                             总长 1
  * ══════════════════════════════════════════════════════════════ */
 
 uint8_t Command_ParseAndExecute(const uint8_t* data, uint16_t len)
@@ -213,6 +220,11 @@ uint8_t Command_ParseAndExecute(const uint8_t* data, uint16_t len)
         if (payloadLen >= 6 && cbRollOL) {
             return (uint8_t)cbRollOL(ReadFloat(payload), ReadU16(payload + 4));
         }
+        break;
+
+    /* ── 磁力计重新校准: 无数据 ── */
+    case CMD_TYPE_CONTROL_MAGCAL:
+        if (cbMagCal) return (uint8_t)cbMagCal();
         break;
 
     default:

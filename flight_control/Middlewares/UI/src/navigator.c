@@ -11,6 +11,7 @@ static void UI_Pid_Draw(UI_Widget* widget);
 static void UI_Accel_Calib_Draw(UI_Widget* widget);
 static void UI_Gyro_Calib_Draw(UI_Widget* widget);
 static void UI_Mag_Calib_Draw(UI_Widget* widget);
+static void UI_MagDbg_Draw(UI_Widget* widget);
 static void UI_Battery_Draw(UI_Widget* widget);
 
 static UI_Window mpuWindow;
@@ -19,6 +20,7 @@ static UI_Window homeWindow;
 static UI_Window accelCalibWindow;
 static UI_Window gyroCalibWindow;
 static UI_Window magCalibWindow;
+static UI_Window magDbgWindow;
 static UI_Window cubeWindow;
 static UI_Window batteryWindow;
 
@@ -55,6 +57,10 @@ void Window_Init(void) {
     UI_Window_Init(&magCalibWindow, 0, 0, 128, 64);
     magCalibWindow.base.draw = UI_Mag_Calib_Draw;
     widgets[WINDOW_MAG_CALIBRATE] = (UI_Widget*)&magCalibWindow;
+
+    UI_Window_Init(&magDbgWindow, 0, 0, 128, 64);
+    magDbgWindow.base.draw = UI_MagDbg_Draw;
+    widgets[WINDOW_MAGDBG] = (UI_Widget*)&magDbgWindow;
 
     UI_Window_Init(&cubeWindow, 0, 0, 128, 64);
     cubeWindow.base.draw = UI_Cube_Draw;
@@ -108,7 +114,10 @@ void UI_IMU_Draw(UI_Widget* widget) {
     snprintf(line, sizeof(line), "MX %6d MY %6d", (int)(mag[0]), (int)(mag[1]));
     GFX_DrawString(x, y + 3 * lh, line, GFX_COLOR_WHITE);
 
-    snprintf(line, sizeof(line), "MZ %6d", (int)(mag[2]));
+    /* N = 实测磁场模长, E = 参考磁场模长 (都应 25~65µT) */
+    snprintf(line, sizeof(line), "MZ %5d N%3d E%3d", (int)mag[2],
+             (int)(Attitude_MagFieldNorm() + 0.5f),
+             (int)(Attitude_MagRefNorm() + 0.5f));
     GFX_DrawString(x, y + 4 * lh, line, GFX_COLOR_WHITE);
 
     // {
@@ -212,10 +221,15 @@ void UI_Cube_Draw(UI_Widget* widget) {
             snprintf(line, sizeof(line), "M: ERR");
             break;
         default:
-            snprintf(line, sizeof(line), "M: --");
+            /* 状态机 IDLE 不代表没校准: 重启后参数从 Flash 加载,
+             * 状态机回 IDLE 但 mag_calib.is_valid=1, 应显示 OK */
+            snprintf(line, sizeof(line), Attitude_MagCalibValid() ? "M: OK" : "M: --");
             break;
         }
-        GFX_DrawString(0, 10, line, GFX_COLOR_WHITE);
+        /* C = EKF 地磁参考已标定, 1 才代表磁力计在修正 yaw */
+        char mbuf[24];
+        snprintf(mbuf, sizeof(mbuf), "%s C%d", line, Attitude_MagRefCalibrated());
+        GFX_DrawString(0, 10, mbuf, GFX_COLOR_WHITE);
     }
 
     /* 高度 */
@@ -252,6 +266,26 @@ void UI_Cube_Draw(UI_Widget* widget) {
     /* FPS */
     snprintf(line, sizeof(line), "FPS:%d", FPS_Get());
     GFX_DrawString(0, 40, line, GFX_COLOR_WHITE);
+
+    /* 磁力计诊断: 新息向量 µT (X/Y/Z, 截±99) + 门控拒绝计数 (R 千位缩写)
+     * 旋转测试: 转90°/180° 看分量变化, 定位轴向映射错误还是硬铁偏置 */
+    {
+        uint32_t mok, mrej;
+        Attitude_MagStats(&mok, &mrej);
+        float iv[3] = {0.0f, 0.0f, 0.0f};
+        Attitude_MagInnovVec(iv);
+        int x = (int)iv[0], y = (int)iv[1], z = (int)iv[2];
+        if (x > 99) x = 99;  if (x < -99) x = -99;
+        if (y > 99) y = 99;  if (y < -99) y = -99;
+        if (z > 99) z = 99;  if (z < -99) z = -99;
+        char rbuf[8];
+        if (mrej >= 1000u)
+            snprintf(rbuf, sizeof(rbuf), "%uk", (unsigned)(mrej / 1000u));
+        else
+            snprintf(rbuf, sizeof(rbuf), "%u", (unsigned)mrej);
+        snprintf(line, sizeof(line), "X%+3d Y%+3d Z%+3d R%s", x, y, z, rbuf);
+        GFX_DrawString(0, 50, line, GFX_COLOR_WHITE);
+    }
 }
 
 static float pidErrorHistory[3][128] = {0}; // 0:roll, 1:pitch, 2:yaw
@@ -339,6 +373,71 @@ void UI_Gyro_Calib_Draw(UI_Widget* widget) {
 
 void UI_Mag_Calib_Draw(UI_Widget* widget) {
 
+}
+
+/* 磁力计坐标轴判断画面 (纯数据):
+ *  M = 实测磁场 (机体系)   H = 预测磁场 R·m_earth (机体系)
+ *  D = 新息 EMA (M−H)      转动后哪个分量 M/H 对不上 = 错误轴线索
+ *  验收: 各姿态转动停稳后 D 三个分量都 ≈0 */
+void UI_MagDbg_Draw(UI_Widget* widget) {
+    char line[40];
+    int x = widget->x + 2;
+    int y = widget->y + 2;
+    int lh = 10;
+
+    float m[3], p[3], d[3];
+    Attitude_GetMag(m);
+    Attitude_MagPredicted(p);
+    Attitude_MagInnovEma(d);
+
+    int mi[3], pi[3], di[3];
+    for (int i = 0; i < 3; i++) {
+        mi[i] = (int)(m[i] + (m[i] < 0 ? -0.5f : 0.5f));
+        pi[i] = (int)(p[i] + (p[i] < 0 ? -0.5f : 0.5f));
+        di[i] = (int)(d[i] + (d[i] < 0 ? -0.5f : 0.5f));
+        if (mi[i] > 999) mi[i] = 999;  if (mi[i] < -999) mi[i] = -999;
+        if (pi[i] > 999) pi[i] = 999;  if (pi[i] < -999) pi[i] = -999;
+        if (di[i] > 999) di[i] = 999;  if (di[i] < -999) di[i] = -999;
+    }
+    snprintf(line, sizeof(line), "M%+4d%+4d%+4d", mi[0], mi[1], mi[2]);
+    GFX_DrawString(x, y + 0 * lh, line, GFX_COLOR_WHITE);
+    snprintf(line, sizeof(line), "H%+4d%+4d%+4d", pi[0], pi[1], pi[2]);
+    GFX_DrawString(x, y + 1 * lh, line, GFX_COLOR_WHITE);
+    snprintf(line, sizeof(line), "D%+4d%+4d%+4d", di[0], di[1], di[2]);
+    GFX_DrawString(x, y + 2 * lh, line, GFX_COLOR_WHITE);
+
+    uint32_t mok, mrej;
+    Attitude_MagStats(&mok, &mrej);
+    int n = (int)(Attitude_MagFieldNorm() + 0.5f);
+    int e = (int)(Attitude_MagRefNorm() + 0.5f);
+    int q = (int)(Attitude_MagInnovPp() + 0.5f);
+    if (n < 0) n = 0;  if (n > 999) n = 999;
+    if (e < 0) e = 0;  if (e > 999) e = 999;
+    if (q < 0) q = 0;  if (q > 999) q = 999;
+    snprintf(line, sizeof(line), "N%3d E%3d C%d Q%2d", n, e,
+             Attitude_MagRefCalibrated(), q);
+    GFX_DrawString(x, y + 3 * lh, line, GFX_COLOR_WHITE);
+
+    char rbuf[6];
+    if (mrej >= 1000u) {
+        unsigned rk = (unsigned)(mrej / 1000u);
+        if (rk > 999u) rk = 999u;
+        snprintf(rbuf, sizeof(rbuf), "%uk", rk);
+    } else {
+        snprintf(rbuf, sizeof(rbuf), "%u", (unsigned)mrej);
+    }
+    int wdeg = (int)(Attitude_YawUnwrapped() +
+                     (Attitude_YawUnwrapped() < 0 ? -0.5f : 0.5f));
+    snprintf(line, sizeof(line), "R%-5s W%+5d", rbuf, wdeg);
+    GFX_DrawString(x, y + 4 * lh, line, GFX_COLOR_WHITE);
+
+    /* 对准状态: A=att_state(0对准中/1已对准) n=IMU好帧 m=磁场好帧
+     * C0 时判卡点: n 不涨→在动; m 不涨→磁数据模长出界; A1 但 C0→对准走了兕底 */
+    uint8_t astate;
+    int acnt, amcnt;
+    Attitude_AlignStats(&astate, &acnt, &amcnt);
+    snprintf(line, sizeof(line), "A%d n%3d m%3d", astate, acnt, amcnt);
+    GFX_DrawString(x, y + 5 * lh, line, GFX_COLOR_WHITE);
 }
 
 void UI_Battery_Draw(UI_Widget* widget) {

@@ -24,6 +24,7 @@ typedef enum {
     CMD_TYPE_CONTROL_LAND         = 0x19,   /* 降落             */
     CMD_TYPE_CONTROL_HOVER        = 0x1A,   /* 悬停             */
     CMD_TYPE_CONTROL_ROLLOL       = 0x1B,   /* Roll 开环阶跃测试 (量执行机构) */
+    CMD_TYPE_CONTROL_MAGCAL       = 0x1C,   /* 磁力计重新校准 (无数据, 需旋转飞行器) */
 } CommandType_t;
 
 
@@ -60,5 +61,7 @@ void Command_SetLandCallback(int8_t (*callback)(void));
 void Command_SetHoverCallback(void (*callback)(void));
 /** @brief  注册：Roll 开环阶跃 (float cmd, uint16_t frames) → int8_t */
 void Command_SetRollOLCallback(int8_t (*callback)(float cmd, uint16_t frames));
+/** @brief  注册：磁力计重新校准 () → int8_t (0=已启动) */
+void Command_SetMagCalibCallback(int8_t (*callback)(void));
 
 #endif /* __COMMAND_H */

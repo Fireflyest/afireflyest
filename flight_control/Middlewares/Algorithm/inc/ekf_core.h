@@ -123,6 +123,13 @@ void ekf_predict(ekf_t* ekf, const ekf_imu_t* imu);
 void ekf_update_mag(ekf_t* ekf, const ekf_mag_t* mag);
 
 /**
+ * @brief 磁力计更新统计 (诊断: 区分 "没修正" 与 "修正被门控拒绝")
+ * @param ok   累计应用次数 (可 NULL)
+ * @param rej  累计野值门控/奇异拒绝次数 (可 NULL)
+ */
+void ekf_mag_stats(uint32_t* ok, uint32_t* rej);
+
+/**
  * @brief GPS 更新 — 修正位置和速度
  *
  * 首次收到有效 GPS 数据时自动初始化坐标原点。

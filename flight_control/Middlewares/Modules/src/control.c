@@ -143,6 +143,10 @@ PID_t pidRoll, pidPitch, pidYaw, pidHeight;
 PID_t pidRateRoll, pidRatePitch, pidRateYaw;
 
 /* 基础 */
+/* 基础油门 (%): 星环架调参基准 = 30。
+ * 注: 电机推力 ∝ 转速², 所以“每1%差动产生的力矩” ∝ 工作油门 ——
+ * 油门从30提到45 等于回路增益×1.5~2, 同一套 PID 会过增益振荡;
+ * 反之油门太低则控制变软。调参请在打算悬停的油门附近调。*/
 uint8_t baseThrottle = 30;
 
     /* 外环 → 内环的共享变量 (volatile, 中断保护) */
@@ -480,7 +484,6 @@ void ControlAttitude_Loop(void) {
     oscLastErr = errRoll;
     float errPitch = errPitch_rad * RAD2DEG;
     float errYaw = errYaw_rad * RAD2DEG;
-    (void)errYaw;
 
     /* 万向锁保护: 大俯仰角时 Yaw/Roll 耦合, 禁用 Yaw 修正 */
     float sinPitch = 2.0f * (curQuat[0] * curQuat[2] - curQuat[1] * curQuat[3]);
@@ -494,9 +497,11 @@ void ControlAttitude_Loop(void) {
      *   error = 0 - errAngle = -errAngle
      *   若 errRoll > 0 (右倾), PID 输出 < 0 (要求左旋速率)
      */
+    /* roll + pitch 均启用; yaw 自稳暂时关闭 */
     float newRateSetRoll = PID_Update(&pidRoll, 0.0f, errRoll, dt);
     float newRateSetPitch = PID_Update(&pidPitch, 0.0f, errPitch, dt);
     float newRateSetYaw = 0.0f;
+    (void)errYaw; /* yaw 关闭期不用 (恢复自稳时改回 PID_Update) */
 
     /* 原子写入共享变量 */
     __disable_irq();
@@ -534,6 +539,8 @@ void ControlMotor_Loop(void) {
     /* ── 1. 速率设定点 ───────────────────────────── */
     float localRateSetRoll = rateSetRoll;
     float localRateSetPitch = rateSetPitch;
+    float localRateSetYaw = rateSetYaw;
+    (void)localRateSetYaw; /* yaw 关闭期不用 */
 
     /* ── 2. 读取陀螺仪 + 速率反馈低通 (rad/s) ────── */
     sm_vec3_t gyro;
@@ -555,6 +562,8 @@ void ControlMotor_Loop(void) {
 
     float gx = rateGyroLpf[0].output * RAD2DEG; /* Roll rate (deg/s) */
     float gy = rateGyroLpf[1].output * RAD2DEG; /* Pitch rate (deg/s) */
+    float gz = rateGyroLpf[2].output * RAD2DEG; /* Yaw rate (deg/s) */
+    (void)gz; /* yaw 关闭期不用 (滤波状态照常更新) */
 
     /*
      * 摆动周期测量: 滤波后 gx 过零 (滞回 ±2 deg/s 防噪声反复触发)。
@@ -598,7 +607,7 @@ void ControlMotor_Loop(void) {
         rollCtrl = PID_Update(&pidRateRoll, localRateSetRoll, gx, dt);
     }
     rateCmdRoll = rollCtrl; /* 诊断遥测 0x04: 阶跃 vs gx 响应 → 量执行机构延迟 */
-    /* yaw 暂停 */
+    /* yaw 自稳暂时关闭 */
     float pitchCtrl = PID_Update(&pidRatePitch, localRateSetPitch, gy, dt);
     float yawCtrl = 0.0f;
 
@@ -619,15 +628,16 @@ void ControlMotor_Loop(void) {
      *   Pitch 正力矩: 机头上抬 → 后方电机推力更大 → M1+, M3+, M2-, M4-
      *   Yaw   正力矩: 机身 CW → CCW 电机反扭矩更大 → M1+, M4+, M2-, M3-
      *
-     * 俯仰符号说明:
-     *   实机自稳调试发现原方向相反, 此处对 pitch 差动取反;
-     *   若需恢复理论推导方向, 将 pitchCtrl 符号改回。
+     * 俯仰/偏航符号说明 (实机调参取反):
+     *   实机自稳调试发现 pitch 与 yaw 的差动方向均与理论推导相反,
+     *   此处对 pitchCtrl、yawCtrl 差动取反 (roll 实机验证方向正确);
+     *   若需恢复理论推导方向, 将对应符号改回。
      */
     float m[MOTOR_COUNT];
-    m[MOTOR_RL] = throttle + rollCtrl + pitchCtrl + yawCtrl;
-    m[MOTOR_FL] = throttle + rollCtrl - pitchCtrl - yawCtrl;
-    m[MOTOR_RR] = throttle - rollCtrl + pitchCtrl - yawCtrl;
-    m[MOTOR_FR] = throttle - rollCtrl - pitchCtrl + yawCtrl;
+    m[MOTOR_RL] = throttle + rollCtrl + pitchCtrl - yawCtrl;
+    m[MOTOR_FL] = throttle + rollCtrl - pitchCtrl + yawCtrl;
+    m[MOTOR_RR] = throttle - rollCtrl + pitchCtrl + yawCtrl;
+    m[MOTOR_FR] = throttle - rollCtrl - pitchCtrl - yawCtrl;
 
     /* PID 输出原样到电机; 仅钳位到 PWM 合法范围 */
     for (int i = 0; i < MOTOR_COUNT; i++) {
@@ -676,10 +686,12 @@ void Control_Init(void) {
     PID_Init(&pidHeight, 8.0f, 1.2f, 2.5f, -15.0f, 15.0f, 0.05f, -15.0f, 15.0f, 1.0f);
     pidHeight.d_max = 10.0f; /* m/s: 拦 EKF 速度异常跳变 (原全局限幅 10000 对 m/s 无效) */
 
-    /* 滚转: Ki 0.40 过冲 → 收到 0.15; IntMax 同步收 */
-    PID_Init(&pidRoll, 2.9f, 0.03f, 0.0f, -40.0f, 40.0f, 0.03f, -PID_OUT_UNLIMITED, PID_OUT_UNLIMITED, 1.0f);
+    /* ── 星环架参数集 (支点在重心, 对象=双积分器, 最接近真实飞行) ──
+     * 注: yaw 目前在控制环里被关闭 (ControlAttitude_Loop / ControlMotor_Loop
+     *     里置 0), 参数保留待恢复; 混控 yawCtrl 取反仍生效 */
+    PID_Init(&pidRoll, 2.9f, 0.01f, 0.0f, -40.0f, 40.0f, 0.03f, -PID_OUT_UNLIMITED, PID_OUT_UNLIMITED, 1.0f);
     /* Pitch 复制 Roll 参数 (单轴 pitch 测试) */
-    PID_Init(&pidPitch, 2.9f, 0.03f, 0.0f, -40.0f, 40.0f, 0.03f, -PID_OUT_UNLIMITED, PID_OUT_UNLIMITED, 1.0f);
+    PID_Init(&pidPitch, 2.8f, 0.01f, 0.001f, -40.0f, 40.0f, 0.03f, -PID_OUT_UNLIMITED, PID_OUT_UNLIMITED, 1.0f);
     PID_Init(&pidYaw, 1.5f, 0.05f, 0.0f, -12.0f, 12.0f, 0.02f, -PID_OUT_UNLIMITED, PID_OUT_UNLIMITED, 1.0f);
 
     PID_Init(&pidRateRoll, 0.32f, 0.005f, 0.0f, -30.0f, 30.0f, 0.02f, -PID_OUT_UNLIMITED, PID_OUT_UNLIMITED, 1.0f);
@@ -726,6 +738,10 @@ int8_t Control_Arm(void) {
     if (curMode != CONTROL_MODE_DIRECT)
         return -1;
     if (thrustOutput > 1.0f)
+        return -1;
+    /* 姿态未对准 (开机磁校准采集期间对准被阻塞) 禁止解锁,
+     * 防止带默认姿态四元数闭环 → 上电就狂打舵 */
+    if (!Attitude_IsAligned())
         return -1;
 
     StopMotors();

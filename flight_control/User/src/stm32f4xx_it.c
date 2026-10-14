@@ -182,21 +182,35 @@ void USART1_IRQHandler(void) {
 }
 
 void USART2_IRQHandler(void) {
-    if (USART_GetITStatus(USART2, USART_IT_IDLE) != RESET) {
-        // 清除 IDLE 标志
-        volatile uint32_t temp;
-        temp = USART2->SR;
-        temp = USART2->DR;
+    /* ★ 关键: 先一次性快照 SR。
+     * STM32 的 IDLE 标志清除序列是 “读 SR 再读 DR” —— 后续任何一次
+     * SR+DR 读序列 (包括 USART_GetITStatus + USART_ReceiveData) 都会
+     * 把它提前清掉。所以必须先记住 IDLE 是否置位, 再取字节。 */
+    uint16_t sr = USART2->SR;
+    int idle = (sr & USART_FLAG_IDLE) ? 1 : 0;
 
-        esRxStatusUart2 = ES_RX_STATE_COMPLETE;
+    /* 线路错误计数 (FE 帧错/NE 噪声/ORE 溢出/PE 校验) 与清除 */
+    if (sr & (USART_FLAG_FE | USART_FLAG_NE | USART_FLAG_ORE | USART_FLAG_PE)) {
+        (void)USART2->SR;
+        (void)USART2->DR;
+        esUart2Err++;
     }
 
-    if (USART_GetITStatus(USART2, USART_IT_RXNE) != RESET) {
+    if (sr & USART_FLAG_RXNE) {
+        /* 取走字节: 读 DR 同时清 RXNE, 并顺带完成清 IDLE 的 SR+DR 序列 */
+        uint8_t ch = (uint8_t)USART2->DR;
         LED_On();
-        if (esRxIndexUart2 < ES_RX_BUFFER_SIZE - 1) {
-            esRxBuffer[esRxIndexUart2++] = (uint8_t)USART_ReceiveData(USART2);
-        }
+        if (esRxIndexUart2 < ES_RX_BUFFER_SIZE - 1)
+            esRxBuffer[esRxIndexUart2++] = ch;
+        /* 缓冲满也必须读走, 否则 RXNE 不清会引发 ORE 风暴 */
+    } else if (idle) {
+        /* 只有 IDLE 没有字节: 补一次 SR+DR 读把 IDLE 清掉 */
+        (void)USART2->SR;
+        (void)USART2->DR;
     }
+
+    if (idle)
+        esRxStatusUart2 = ES_RX_STATE_COMPLETE;
 }
 
 void DMA1_Stream6_IRQHandler(void) {

@@ -301,15 +301,26 @@ static void propagate_covariance(ekf_t* ekf,
 /*  通用 Kalman 更新 (Joseph 形式 + 野值门控)                                  */
 /* ========================================================================== */
 
+/* 磁力计更新统计: 野值门控 (Mahalanobis) 拒绝会静默丢掉修正,
+ * 上屏计数用于区分 "磁场没修正" 和 "磁场修正不收敛" */
+static uint32_t s_magUpdOk = 0;
+static uint32_t s_magUpdRej = 0;
+
+void ekf_mag_stats(uint32_t* ok, uint32_t* rej) {
+    if (ok) *ok = s_magUpdOk;
+    if (rej) *rej = s_magUpdRej;
+}
+
 /**
  * @param n  观测维度 (1, 2, 3)
  * @param y  新息向量 [n]
  * @param H  观测矩阵 [n × 15] 行主序
  * @param R  量测噪声 [n × n] 对称，行主序
+ * @return 1 = 已应用; 0 = 拒绝 (未初始化/奇异/野值门控)
  */
-static void ekf_do_update(ekf_t* ekf, int n, const float* y, const float* H, const float* R) {
+static int ekf_do_update(ekf_t* ekf, int n, const float* y, const float* H, const float* R) {
     if (!ekf->initialized)
-        return;
+        return 0;
 
     float (*P)[EKF_ERROR_STATE_DIM] = ekf->P.data;
     const int N = EKF_ERROR_STATE_DIM; /* 15 */
@@ -359,7 +370,7 @@ static void ekf_do_update(ekf_t* ekf, int n, const float* y, const float* H, con
         singular = m3_inv(S, Si);
     }
     if (singular)
-        return;
+        return 0;
 
     /* PHᵀ 的第 (j,i) 元素 = P[j]ᵀ·H[i]ᵀ = HP[i][j] (P 对称) */
     float K[15][3];
@@ -372,17 +383,21 @@ static void ekf_do_update(ekf_t* ekf, int n, const float* y, const float* H, con
         }
 
     /* ---- Step 4: 野值门控 (Mahalanobis 距离) ---- */
-    /* χ² 阈值: 99% 置信 */
+    /* χ² 阈值: 99% 置信。
+     * d2 必须是 yᵀ·S⁻¹·y (S⁻¹ = Si, 上一步已求出);
+     * 历史 bug: 误写成 yᵀ·S·y, S 量纲为测量单位² (µT²级),
+     * 等效门限被压到 sqrt(11.345/S) — 稍有误差就全拒,
+     * 表现为 R 持续增长、修正长期被丢 (拒—漂—拒)。 */
     static const float chi2_thresh[] = {0.0f, 6.635f, 9.210f, 11.345f};
     float d2 = 0.0f;
     for (int i = 0; i < n; i++) {
         float Syi = 0.0f;
         for (int j = 0; j < n; j++)
-            Syi += S[i][j] * y[j];
+            Syi += Si[i][j] * y[j];
         d2 += y[i] * Syi;
     }
     if (d2 > chi2_thresh[n])
-        return;
+        return 0;
 
     /* ---- Step 5: 误差状态 δx = K · y ---- */
     float dx[15];
@@ -458,6 +473,8 @@ static void ekf_do_update(ekf_t* ekf, int n, const float* y, const float* H, con
             if (j != i)
                 P[j][i] = s;
         }
+
+    return 1;
 }
 
 /* ========================================================================== */
@@ -579,9 +596,17 @@ void ekf_cov_init_diagonal(ekf_cov_t* P,
 void ekf_noise_params_init_default(ekf_noise_params_t* p) {
     p->gyro_noise = 1.0e-2f;       /* rad/s/√Hz   */
     p->gyro_bias_noise = 5.0e-3f;  /* rad/s/√s    */
-    p->accel_noise = 5.0e-2f;      /* m/s²/√Hz    */
+    p->accel_noise = 0.05f;        /* m/s² (1σ)。静止桌面值。
+                                    * 注意: χ² 门控修正后 (yᵀS⁻¹y), 重力更新
+                                    * 门限 ≈ √(11.345×(96P+noise²)) → 0.05 时
+                                    * 约 1°, 振动环境下大量拒绝 → 姿态只能靠
+                                    * 陀螺积分缓慢倾斜。若出现“低油门正常、
+                                    * 转起来后缓慢倒向一边”, 先调这里 (0.3~1.0) */
     p->accel_bias_noise = 1.0e-3f; /* m/s²/√s     */
-    p->mag_noise = 0.5f;           /* μT/√Hz      */
+    p->mag_noise = 2.0f;           /* µT/√Hz。0.5 时 χ² 门限等效只允许
+                                   * ~2.4° yaw 误差: 抖动后一超限就全拒,
+                                   * 进入 拒—漂—拒 循环 (R 几千、I 冲到上百);
+                                   * 2.0 → 门限 ~10°, 修正也更柔 */
     p->baro_noise = 0.5f;          /* m/√Hz       */
     p->baro_bias_noise = 5.0e-2f;  /* m/√s        */
     p->gps_pos_noise = 2.0f;       /* m (1σ)      */
@@ -916,7 +941,10 @@ void ekf_update_mag(ekf_t* ekf, const ekf_mag_t* mag) {
     float Rm = ekf->noise.mag_noise * ekf->noise.mag_noise;
     float R_mat[3][3] = {{Rm, 0, 0}, {0, Rm, 0}, {0, 0, Rm}};
 
-    ekf_do_update(ekf, 3, y, &H[0][0], &R_mat[0][0]);
+    if (ekf_do_update(ekf, 3, y, &H[0][0], &R_mat[0][0]))
+        s_magUpdOk++;
+    else
+        s_magUpdRej++;
 }
 
 void ekf_update_gps(ekf_t* ekf, const ekf_gps_t* gps) {

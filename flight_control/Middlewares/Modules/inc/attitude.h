@@ -97,4 +97,85 @@ uint8_t Attitude_MagCalibStatus(void);
 
 uint8_t Attitude_MagCalibValid(void);
 
+/**
+ * @brief 姿态是否已完成对准 (EKF 就绪)
+ * @note  磁力计校准采集期间对准被阻塞, 此时禁止解锁
+ */
+uint8_t Attitude_IsAligned(void);
+
+/**
+ * @brief 对准状态诊断
+ * @param state   0=对准中(ATT_ALIGNING), 1=已对准(RUNNING)
+ * @param cnt     IMU 好帧计数 (静止累积, 运动清零; ≥3 或兕底 200 才对准)
+ * @param magCnt  磁力计好帧计数 (模长 20~100µT 才计; >10 才建参考)
+ */
+void Attitude_AlignStats(uint8_t* state, int* cnt, int* magCnt);
+
+/**
+ * @brief EKF 地磁参考是否已标定
+ * @return 1 = 磁力计正在修正 yaw (ekf_update_mag 实际生效);
+ *         0 = 未生效 (未对准/校准参数无效/场强异常被拒)
+ */
+uint8_t Attitude_MagRefCalibrated(void);
+
+/**
+ * @brief 磁力计更新统计 (诊断)
+ * @param ok   累计应用次数 (可 NULL)
+ * @param rej  累计被野值门控拒绝次数 (可 NULL)
+ *            漂移且 rej 快速增长 → 修正被门控拒掉, 是门控/噪声参数问题
+ */
+void Attitude_MagStats(uint32_t* ok, uint32_t* rej);
+
+/**
+ * @brief 磁场新息模长 |实测 - R·参考| (µT)
+ * @return 非负值; -1 = 地磁参考未标定
+ *         漂移且此值持续偏大 → 参考/校准不一致;
+ *         漂移且此值 ≈0 → 修正正常, 问题不在磁力计链路
+ */
+float Attitude_MagInnov(void);
+
+/**
+ * @brief 当前实测磁场模长 |mag_current| (µT, 校准后)
+ * @return 稳定应 25~65; 随姿态大幅乱变 → 校准参数坏, 需重新校准
+ */
+float Attitude_MagFieldNorm(void);
+
+/**
+ * @brief 地磁参考模长 |m_earth| (µT)
+ * @return 稳定应 25~65; -1 = 参考未标定
+ */
+float Attitude_MagRefNorm(void);
+
+/**
+ * @brief 磁场新息向量 (实测 - R·参考), 机体系 µT
+ * @param v  输出 3 分量 (可 NULL)
+ * @return 1 = 有效; 0 = 地磁参考未标定 (v 置 0)
+ * @note   旋转测试: 转90° 某分量突变 → 该轴映射问题的线索
+ */
+int Attitude_MagInnovVec(float v[3]);
+
+/**
+ * @brief 预测的机体系磁场 hm = R · m_earth (µT)
+ * @note  未标定时 v 置 0; 与实测 Attitude_GetMag 对比可定位错误轴
+ */
+void Attitude_MagPredicted(float v[3]);
+
+/**
+ * @brief 新息 EMA (τ=0.3s), 调试读数用
+ * @note  静止时应稳定 (≈噪声均值); 旋转后 1s 内收敛到新值
+ */
+void Attitude_MagInnovEma(float v[3]);
+
+/**
+ * @brief 最近 1s 窗口内新息各轴峰峰值的最大值 (µT)
+ * @return 非负; -1 = 参考未标定。静止时应小 (几 µT), 阶跃/故障时大
+ */
+float Attitude_MagInnovPp(void);
+
+/**
+ * @brief 连续化 yaw (°), 诊断显示用
+ * @return 跨 ±180 wrap 不跳变的累计 yaw; 绕圈后可超出 ±180
+ */
+float Attitude_YawUnwrapped(void);
+
 #endif /* ATTITUDE_H */

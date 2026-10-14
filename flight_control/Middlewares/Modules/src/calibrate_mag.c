@@ -58,6 +58,7 @@ void Calib_Mag_Init(Calib_Mag_Handle_t* handle) {
 void Calib_Mag_Start(Calib_Mag_Handle_t* handle) {
     handle->state = CALIB_MAG_COLLECTING;
     handle->sample_count = 0;
+    handle->attempt_count = 0;
     handle->coverage_ok = 0;
     handle->calib.is_valid = 0;
 
@@ -71,6 +72,18 @@ void Calib_Mag_Start(Calib_Mag_Handle_t* handle) {
 void Calib_Mag_AddSample(Calib_Mag_Handle_t* handle, const float mag[3]) {
     if (handle->state != CALIB_MAG_COLLECTING)
         return;
+
+    handle->attempt_count++;
+
+    /* 野值过滤: 模长不在地磁合理范围的样本直接丢 (毛刺/接触不良),
+     * 不计数、不进 min/max — 否则单个坏样本就能把量程撑坏 */
+    float n2 = mag[0] * mag[0] + mag[1] * mag[1] + mag[2] * mag[2];
+    if (n2 < CALIB_MAG_NORM_MIN * CALIB_MAG_NORM_MIN ||
+        n2 > CALIB_MAG_NORM_MAX * CALIB_MAG_NORM_MAX) {
+        if (handle->attempt_count >= CALIB_MAG_MAX_SAMPLES)
+            handle->state = CALIB_MAG_FAILED; /* 全被拒也要能超时退出 */
+        return;
+    }
 
     /* 更新 min/max */
     for (int i = 0; i < 3; i++) {
@@ -100,7 +113,8 @@ void Calib_Mag_AddSample(Calib_Mag_Handle_t* handle, const float mag[3]) {
     }
 
     /* 样本用尽仍未达标 → 失败 */
-    if (handle->sample_count >= CALIB_MAG_MAX_SAMPLES) {
+    if (handle->sample_count >= CALIB_MAG_MAX_SAMPLES ||
+        handle->attempt_count >= CALIB_MAG_MAX_SAMPLES) {
         handle->state = CALIB_MAG_FAILED;
     }
 }

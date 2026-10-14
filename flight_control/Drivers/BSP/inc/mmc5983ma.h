@@ -56,11 +56,13 @@
 
 /* MMC5983MA 灵敏度
  * 满量程 ±8 Gauss = ±800 µT
- * 18-bit: 262144 LSB / 16 Gauss → 16384 LSB/Gauss → 0.061035 µT/LSB
- * 16-bit: 65536 LSB / 16 Gauss  → 4096 LSB/Gauss  → 0.244141 µT/LSB
+ * 18-bit: 262144 LSB / 16 Gauss → 16384 LSB/Gauss → 100µT/16384 = 0.0061035 µT/LSB
+ * 16-bit: 65536 LSB / 16 Gauss  → 4096 LSB/Gauss  → 100µT/4096  = 0.0244141 µT/LSB
+ * (历史 bug: 曾按 1G=1000µT 算成 0.244141/0.061035, 大了 10 倍,
+ *  地磁场被读成 ~460 → 模长处处超 sanity 窗口 → mag_ref 永不标定)
  */
-#define MMC5983MA_SENS_UT_PER_LSB_16BIT 0.244141f
-#define MMC5983MA_SENS_UT_PER_LSB_18BIT 0.061035f
+#define MMC5983MA_SENS_UT_PER_LSB_16BIT 0.0244141f
+#define MMC5983MA_SENS_UT_PER_LSB_18BIT 0.0061035f
 
 /* ═══════════════════════════════════════════════════
  *  枚举

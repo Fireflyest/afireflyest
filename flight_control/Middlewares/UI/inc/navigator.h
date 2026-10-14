@@ -24,6 +24,7 @@
 #define WINDOW_MAG_CALIBRATE     6   
 #define WINDOW_CUBE              7
 #define WINDOW_BATTERY           8
+#define WINDOW_MAGDBG            9
 
 extern UI_Logger logWindow;
 

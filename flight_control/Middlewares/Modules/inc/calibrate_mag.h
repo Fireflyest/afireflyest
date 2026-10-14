@@ -28,6 +28,12 @@
 #define CALIB_MAG_MAX_SAMPLES 5000 /**< 最多样本数 (超时)         */
 #define CALIB_MAG_MIN_RANGE 20.0f  /**< 各轴最小变化范围 (μT)     */
 
+/* 样本模长合理性窗口 (μT): 地磁场 25~65, 窗口放宽到 10~120。
+ * SPI 毛刺/接触不良的垃圾样本模长通常是几百以上, 直接丢弃 —
+ * min/max 校准对野值零防护, 一个坏样本就能把量程撑坏 */
+#define CALIB_MAG_NORM_MIN 10.0f
+#define CALIB_MAG_NORM_MAX 120.0f
+
 /**
  * @brief 磁力计校准参数
  */
@@ -58,6 +64,7 @@ typedef struct {
     float mag_min[3];      /**< 采集期间各轴最小值 (μT)      */
     float mag_max[3];      /**< 采集期间各轴最大值 (μT)      */
     uint32_t sample_count; /**< 已采集样本数                 */
+    uint32_t attempt_count; /**< 尝试样本数 (含被拒的野值, 用于超时兜底) */
     uint8_t coverage_ok;   /**< 各轴覆盖度是否达标           */
 } Calib_Mag_Handle_t;
 
