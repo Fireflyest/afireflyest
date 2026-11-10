@@ -6,35 +6,15 @@
 #include "ble.h"
 #include "battery.h"
 #include "navigator.h"
+#include "flow.h"
 
 
 
 
 static float init_altitude, init_temperature;
 
-/* UART2 (子板 光流+激光) 接收调试计数 */
-static uint32_t u2Frames = 0;
-static uint32_t u2Bytes = 0;
-static uint32_t u2Bursts = 0; /* IDLE 成帧次数 (看时序: b/n = 每突发字节数) */
-static uint32_t u2LastSum = 0;
-static uint16_t u2LastLen = 0; /* 最近一行的长度 */
-static char     u2Line[80];    /* 行重组缓冲 (按 '\n' 切行, 不依赖 IDLE 成帧) */
-static uint16_t u2LineLen = 0;
-
-/**
- * @brief UART2 收到完整一行时的处理 (解析 + 限速显示到 OLED log 页)
- * @note  显示限速 500ms, 否则子板 20Hz 会把屏幕刷成一团
- */
-static void Uart2_HandleLine(const char* line) {
-    char dbg[TEXTLIST_MAX_CHARS + 1];
-
-    /* 只显示子板的 [..] 消息 (初始化/错误/状态):
-     * OLED 只有几行, 数据行 (20Hz) 不能上屏 — 只计数, 看 10s 心跳行即可 */
-    if (line[0] == '[') {
-        snprintf(dbg, sizeof(dbg), "%s", line);
-        UI_Logger_AddLine(&logWindow, dbg);
-    }
-}
+/* UART2 光流子板: 二进制帧解析在 flow.c, 这里只保留 10s 心跳统计计时 */
+static uint32_t u2StatTick = 0;
 
 /* 磁力计重新校准入口 (0x1C): 飞行中拒绝, 避免中途作废地磁参考 */
 static int8_t MagCalib_StartSafe(void) {
@@ -195,6 +175,7 @@ int main() {
     Init_DMA_For_USART1_TX(bleTxBuffer);
     UART1_GPIO_Init();
     UART2_GPIO_Init();
+    Flow_Init(); /* 光流子板二进制协议解析器 */
     BLE_Init(BLE_BAUDRATE_115200);
     ExtraSensor_Init(ES_BAUDRATE_115200);
     UI_Logger_AddLine(&logWindow, "UART Init OK");
@@ -292,7 +273,7 @@ int main() {
     Command_SetRollOLCallback(Control_RollOpenLoopTest);
     Command_SetMagCalibCallback(MagCalib_StartSafe);
 
-    Window_To(WINDOW_NONE); /* 默认显示 log 页 (UART2 接收调试用) */
+    Window_To(WINDOW_FLOW); /* 默认显示 log 页 */
 
     // TaskHandle_t xExampleTaskHandle = NULL;
     // ( void ) xTaskCreate( exampleTask,
@@ -370,66 +351,33 @@ int main() {
     
         Battery_Measure_Step();
 
-        /* ── UART2 自发自收测试 (调试用, 验证完改 0) ──
-         * 每秒从 PA2 发一行模拟子板格式的文本:
-         *   ① 示波器/USB-TTL 接主控 PA2 应看到波形;
-         *   ② PA2-PA3 短接时, log 页应出现 #n V1 Q80 D123
-         *      (验证 发送→接收→解析→显示 全链路) */
-#define UART2_TX_TEST 0
-#if UART2_TX_TEST
+        /* 注: 旧的 UART2 自发自收 ASCII 测试 (发送 "V:1 X:.. Y:.." 文本行)
+         * 已随按行解析一起删除 —— 二进制协议下文本行只会被当作噪声丢弃。
+         * 若需链路自检, 用子板的 50Hz 二进制帧 + 下面对应的 ok/crc/lost 计数。 */
+
+        /* ── UART2 (光流子板) 接收: 字节流交给二进制帧状态机 ──
+         * ISR 只负责把字节放进 esRxBuffer (可保留 IDLE 辅助切帧),
+         * 这里无条件排空缓冲并逐字节喂给解析器:
+         *   - 不依赖 IDLE 成帧, 数据流粘连/分片都能重新对齐 AA 55
+         *   - 解析开销 = 36 字节状态机 + CRC, 50Hz 下可忽略, 不阻塞主循环 */
         {
-            static uint32_t u2TxLast = 0;
-            static uint32_t u2TxCnt = 0;
-            if (systemTick - u2TxLast >= 1000u) {
-                u2TxLast = systemTick;
-                u2TxCnt++;
-                char t[48];
-                int n = snprintf(t, sizeof(t),
-                                 "V:1 X:%d Y:%d Q:80 dX:0 dY:0 D:123 S:0\r\n",
-                                 (int)(u2TxCnt % 1000u), (int)(u2TxCnt % 100u));
-                if (n > 0)
-                    ExtraSensor_WriteData((uint8_t*)t, (uint16_t)n);
+            uint8_t rx[ES_RX_BUFFER_SIZE];
+            uint16_t n = ExtraSensor_ReadData(rx);
+            if (n > 0) {
+                Flow_FeedBytes(rx, n);
             }
         }
-#endif
+        Flow_Update(); /* 200ms 无有效帧 -> link_ok=0 */
 
-        /* ── UART2 (子板) 接收: 按行重组 ──
-         * IDLE 成帧在这条链路上不可靠: 发送方字节之间有停顿就会“每1字节一帧”
-         * (实测 b/f ≈ 1), 导致解析永远失败。改成按 '\n'/\r' 组行, 与成帧无关。 */
-        if (esRxStatusUart2 == ES_RX_STATE_COMPLETE) {
-            uint8_t extra_sensor_data[64] = {0};
-            uint16_t extra_sensor_len = ExtraSensor_ReadData(extra_sensor_data);
-            u2Bursts++; /* 一次 IDLE 成帧 = 一个突发 */
-
-            for (uint16_t i = 0; i < extra_sensor_len; i++) {
-                uint8_t ch = extra_sensor_data[i];
-                u2Bytes++;
-                if (ch == '\n' || ch == '\r') {
-                    if (u2LineLen > 0) {
-                        u2Line[u2LineLen] = '\0';
-                        u2LastLen = u2LineLen;
-                        u2LineLen = 0;
-                        u2Frames++;
-                        Uart2_HandleLine(u2Line); /* 解析 + 限速显示 */
-                    }
-                } else if (u2LineLen < sizeof(u2Line) - 1) {
-                    u2Line[u2LineLen++] = (char)ch;
-                } else {
-                    u2LineLen = 0; /* 超长: 丢弃重来 */
-                }
-
-            }
-
-        }
-
-        /* 每 10s 一行心跳统计 (很安静):
-         *   n=成帧次数 b=字节数 L=最近行长度 e=线路错误数 */
-        if (systemTick - u2LastSum >= 10000u) {
-            u2LastSum = systemTick;
+        /* 每 10s 一行光流链路统计 (很安静):
+         *   ok=有效帧 crc=CRC错误 lost=seq 估算丢帧 err=UART 线路错误 */
+        if (systemTick - u2StatTick >= 10000u) {
+            const flow_data_t *fl = Flow_Get();
             char dbg[TEXTLIST_MAX_CHARS + 1];
-            snprintf(dbg, sizeof(dbg), "n%lu b%lu L%u e%u",
-                     (unsigned long)u2Bursts, (unsigned long)u2Bytes,
-                     (unsigned)u2LastLen, (unsigned)esUart2Err);
+            u2StatTick = systemTick;
+            snprintf(dbg, sizeof(dbg), "F ok%lu c%lu l%lu e%u",
+                     (unsigned long)fl->rx_ok, (unsigned long)fl->rx_crc_err,
+                     (unsigned long)fl->rx_lost, (unsigned)esUart2Err);
             UI_Logger_AddLine(&logWindow, dbg);
         }
 
@@ -543,8 +491,33 @@ int main() {
             }
         }
 
+        /* ── 按键 ──
+         * 普通: 按链表切换窗口 NONE→IMU→MAGDBG→CUBE→BATTERY→PID→FLOW→NONE
+         * WINDOW_FLOW 内: 短按 = 累积位置清零 (方便反复测试),
+         *                长按 800ms = 回到 WINDOW_NONE, 否则出不了该窗口 */
+        {
+            static uint32_t flowKeyDownTick = 0;
+            static uint8_t  flowKeyWasDown  = 0;
+            static uint8_t  flowLongFired   = 0;
+            uint8_t keyDown = (Key_Status() == KEY_STATE_PRESSED);
+
+            if (keyDown && !flowKeyWasDown) {
+                flowKeyDownTick = systemTick;
+                flowLongFired   = 0;
+            }
+            if (keyDown && !flowLongFired && Window_Current() == WINDOW_FLOW &&
+                (uint32_t)(systemTick - flowKeyDownTick) >= 800u) {
+                flowLongFired = 1;      /* 只触发一次, 松开前不重复 */
+                Window_To(WINDOW_NONE);
+            }
+            flowKeyWasDown = keyDown;
+        }
+
         if (Key_PressConsume()) {
-            if (Window_Current() == WINDOW_NONE) {
+            if (Window_Current() == WINDOW_FLOW) {
+                /* 光流窗口内: 短按清零累积位置 (长按已在上面的检测里切窗口) */
+                Flow_ResetPosition();
+            } else if (Window_Current() == WINDOW_NONE) {
                 Window_To(WINDOW_IMU);
             } else if (Window_Current() == WINDOW_IMU) {
                 Window_To(WINDOW_MAGDBG);
@@ -555,6 +528,8 @@ int main() {
             } else if (Window_Current() == WINDOW_BATTERY) {
                 Window_To(WINDOW_PID);
             } else if (Window_Current() == WINDOW_PID) {
+                Window_To(WINDOW_FLOW);
+            } else {
                 Window_To(WINDOW_NONE);
             }
         }

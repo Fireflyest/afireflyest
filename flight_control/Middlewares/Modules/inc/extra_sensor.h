@@ -7,7 +7,7 @@
 #define ES_BAUDRATE_9600 ((uint32_t)9600)
 #define ES_BAUDRATE_115200 ((uint32_t)115200)
 
-#define ES_RX_BUFFER_SIZE 64
+#define ES_RX_BUFFER_SIZE 128
 #define ES_TX_BUFFER_SIZE 64
 
 #define ES_RX_STATE_IDLE 0

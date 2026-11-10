@@ -38,13 +38,23 @@ void ExtraSensor_Init(uint32_t baudrate) {
 }
 
 uint16_t ExtraSensor_ReadData(uint8_t* data) {
-    uint16_t size = esRxIndexUart2;
+    uint16_t size;
+    uint32_t primask;
+
+    /* 二进制帧不允许丢字节: 快照 + 复制 + 清索引必须原子,
+     * 否则 ISR 在 memcpy 期间写入的字节会被清索引丢掉 */
+    primask = __get_PRIMASK();
+    __disable_irq();
+
+    size = esRxIndexUart2;
     if (size > 0) {
         memcpy(data, esRxBuffer, size);
-        data[size] = '\0';  // Null-terminate the string
+        data[size] = '\0';  // 兼容旧的行解析调用者
+        esRxIndexUart2 = 0;
     }
     esRxStatusUart2 = ES_RX_STATE_IDLE;
-    esRxIndexUart2 = 0;
+
+    __set_PRIMASK(primask);
     return size;
 }
 

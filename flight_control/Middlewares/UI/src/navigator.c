@@ -1,5 +1,7 @@
 #include "navigator.h"
+#include "flow.h"
 #include <string.h>
+#include <math.h>
 
 UI_Logger logWindow;
 
@@ -13,6 +15,7 @@ static void UI_Gyro_Calib_Draw(UI_Widget* widget);
 static void UI_Mag_Calib_Draw(UI_Widget* widget);
 static void UI_MagDbg_Draw(UI_Widget* widget);
 static void UI_Battery_Draw(UI_Widget* widget);
+static void UI_Flow_Draw(UI_Widget* widget);
 
 static UI_Window mpuWindow;
 static UI_Window pidWindow;
@@ -23,6 +26,7 @@ static UI_Window magCalibWindow;
 static UI_Window magDbgWindow;
 static UI_Window cubeWindow;
 static UI_Window batteryWindow;
+static UI_Window flowWindow;
 
 
 void Window_Init(void) {
@@ -69,6 +73,10 @@ void Window_Init(void) {
     UI_Window_Init(&batteryWindow, 0, 0, 128, 64);
     batteryWindow.base.draw = UI_Battery_Draw;
     widgets[WINDOW_BATTERY] = (UI_Widget*)&batteryWindow;
+
+    UI_Window_Init(&flowWindow, 0, 0, 128, 64);
+    flowWindow.base.draw = UI_Flow_Draw;
+    widgets[WINDOW_FLOW] = (UI_Widget*)&flowWindow;
 }
 
 uint8_t Window_Current(void) {
@@ -491,4 +499,198 @@ void UI_Battery_Draw(UI_Widget* widget) {
     snprintf(buf, sizeof(buf), "status %d", pwr_state);
     GFX_DrawString(iconX - 34, iconY + 20, buf, GFX_COLOR_WHITE);
     
+}
+
+/* ── WINDOW_FLOW: 光流航位推算轨迹 ───────────────────────────────────
+ *
+ *  屏幕中心 = 累积位移原点, 虚十字为坐标轴 (浅色 = 隔像素点)。
+ *  点位置 = 累积位移 (cm) × PX_PER_CM; 这是航位推算累积量, 会漂移,
+ *  不是绝对位置。
+ *  数据可信度用点的样式表示:
+ *    OK   (valid==1, 链路正常)  -> 实心圆
+ *    LOW  (valid==2) / 已出界   -> 空心圆
+ *    LOST (链路超时断开)        -> 叉号
+ *
+ *  布局 (128x64):
+ *    y+0  : 顶部状态行   Q质量 D距离cm V速度cm/s + 状态字
+ *    11..43: 绘图区     中心 (64,27), 纵向约 ±8cm, 横向约 ±31cm
+ *    y+44 : 帧统计      有效帧 / CRC 错 / 丢帧
+ *    y+52 : 底部        累积位移 PX/PY (cm, 1 位小数)
+ */
+
+#define FLOW_PX_PER_CM      2.0f    /* 1cm = 2px, 横向可视约 ±31cm */
+#define FLOW_PLOT_TOP       11
+#define FLOW_PLOT_BOTTOM    43
+#define FLOW_CX             (128 / 2)
+#define FLOW_CY             ((FLOW_PLOT_TOP + FLOW_PLOT_BOTTOM) / 2)
+
+static int Flow_RoundI(float v)
+{
+    return (int)(v + (v < 0.0f ? -0.5f : 0.5f));
+}
+
+/* 实心圆 (GFX_DrawCircle 未实现, 这里自己画) */
+static void Flow_FillCircle(int cx, int cy, int r, GFX_Color color)
+{
+    int dx, dy;
+    int r2 = r * r;
+    for (dy = -r; dy <= r; dy++) {
+        for (dx = -r; dx <= r; dx++) {
+            if (dx * dx + dy * dy <= r2) {
+                GFX_DrawPixel(cx + dx, cy + dy, color);
+            }
+        }
+    }
+}
+
+/* 空心圆: 表示 "数据降级/已出界" */
+static void Flow_DrawRing(int cx, int cy, int r, GFX_Color color)
+{
+    int dx, dy;
+    int outer = r * r;
+    int inner = (r - 1) * (r - 1);
+    for (dy = -r; dy <= r; dy++) {
+        for (dx = -r; dx <= r; dx++) {
+            int d2 = dx * dx + dy * dy;
+            if (d2 <= outer && d2 > inner) {
+                GFX_DrawPixel(cx + dx, cy + dy, color);
+            }
+        }
+    }
+}
+
+/* 有符号 cm, 1 位小数; 手工拆分整数/小数, 不用浮点 printf
+ * |v| >= 100cm 时省掉小数位以控制行宽 */
+static void Flow_FmtCm(char *out, int outSize, float cm)
+{
+    int neg = (cm < 0.0f);
+    float a = neg ? -cm : cm;
+    int ip, fp;
+
+    if (a > 999.0f) {
+        a = 999.0f;
+    }
+    ip = (int)a;
+
+    if (a >= 100.0f) {
+        snprintf(out, outSize, "%s%d", neg ? "-" : "", ip);
+        return;
+    }
+
+    fp = (int)((a - (float)ip) * 10.0f + 0.5f);
+    if (fp >= 10) {
+        fp = 0;
+        ip++;
+    }
+    snprintf(out, outSize, "%s%d.%d", neg ? "-" : "", ip, fp);
+}
+
+static void UI_Flow_Draw(UI_Widget* widget)
+{
+    char line[32];
+    char s1[12], s2[12];
+    const flow_data_t *f = Flow_Get();
+
+    const int x = widget->x + 2;
+    const int y = widget->y + 2;
+    const int right = widget->x + widget->w - 2;
+
+    float pxcm = Flow_GetPosX() * 100.0f;
+    float pycm = Flow_GetPosY() * 100.0f;
+    int sx, sy;
+    int out = 0;
+    const char *st;
+
+    /* ── 状态判定 ── */
+    if (!f->link_ok) {
+        st = "LOST";
+    } else if (f->valid == 1u) {
+        st = "OK";
+    } else if (f->valid == 2u) {
+        st = "LOW";
+    } else {
+        st = "IDLE";
+    }
+
+    /* ── 顶部状态行: Q / D(cm) / V(cm/s) / 状态 ── */
+    if (isfinite(f->distance_m) && f->distance_m > 0.0f) {
+        int dcm = Flow_RoundI(f->distance_m * 100.0f);
+        if (dcm > 999) {
+            dcm = 999;
+        }
+        snprintf(line, sizeof(line), "Q%3u D%3d", (unsigned)f->quality, dcm);
+    } else {
+        /* 距离未知 / 激光失联: 位移被冻结, 用 D--- 标注 */
+        snprintf(line, sizeof(line), "Q%3u D---", (unsigned)f->quality);
+    }
+    GFX_DrawString(x, y, line, GFX_COLOR_WHITE);
+
+    /* 速度: v = 单帧位移 / integration_us, 单位 m/s -> 显示 cm/s */
+    if (f->link_ok && f->valid == 1u && f->distance_m > 0.0f &&
+        f->integration_us > 0u &&
+        isfinite(f->flow_x_rad) && isfinite(f->flow_y_rad)) {
+        float vx = f->flow_x_rad * f->distance_m;
+        float vy = f->flow_y_rad * f->distance_m;
+        float v = sqrtf(vx * vx + vy * vy) * 1e6f / (float)f->integration_us;
+        int vcm = isfinite(v) ? Flow_RoundI(v * 100.0f) : 0;
+        if (vcm > 999) {
+            vcm = 999;
+        }
+        if (vcm < 0) {
+            vcm = 0;
+        }
+        snprintf(line, sizeof(line), "V%3d", vcm);
+    } else {
+        snprintf(line, sizeof(line), "V  -");
+    }
+    GFX_DrawString(x + 56, y, line, GFX_COLOR_WHITE);
+
+    GFX_DrawString(right - (int)strlen(st) * 6, y, st, GFX_COLOR_WHITE);
+
+    /* ── 虚十字轴线 (屏幕中心 = 原点) ── */
+    {
+        int xx, yy;
+        for (xx = x; xx < right; xx += 2) {
+            GFX_DrawPixel(xx, FLOW_CY, GFX_COLOR_WHITE);
+        }
+        for (yy = FLOW_PLOT_TOP; yy <= FLOW_PLOT_BOTTOM; yy += 2) {
+            GFX_DrawPixel(FLOW_CX, yy, GFX_COLOR_WHITE);
+        }
+    }
+
+    /* ── 累积位置 -> 屏幕坐标, 出界钳位 ── */
+    sx = FLOW_CX + Flow_RoundI(pxcm * FLOW_PX_PER_CM);
+    sy = FLOW_CY + Flow_RoundI(pycm * FLOW_PX_PER_CM);
+
+    if (sx < x)                     { sx = x;                     out = 1; }
+    if (sx > right)                 { sx = right;                 out = 1; }
+    if (sy < FLOW_PLOT_TOP + 2)     { sy = FLOW_PLOT_TOP + 2;     out = 1; }
+    if (sy > FLOW_PLOT_BOTTOM - 2)  { sy = FLOW_PLOT_BOTTOM - 2;  out = 1; }
+
+    /* ── 画点: 样式随数据可信度变化 ── */
+    if (!f->link_ok) {
+        /* 链路断开: 叉号, 提示当前点不可信 */
+        GFX_DrawLine(sx - 2, sy - 2, sx + 2, sy + 2, GFX_COLOR_WHITE);
+        GFX_DrawLine(sx - 2, sy + 2, sx + 2, sy - 2, GFX_COLOR_WHITE);
+    } else if (out || f->valid == 2u) {
+        /* 出界或质量被拒: 空心圆 */
+        Flow_DrawRing(sx, sy, 3, GFX_COLOR_WHITE);
+    } else {
+        Flow_FillCircle(sx, sy, 2, GFX_COLOR_WHITE);
+    }
+
+    /* ── 帧统计 (调试): K=有效帧 C=CRC错 L=seq 估算丢帧 ── */
+    {
+        unsigned ok = f->rx_ok > 99999u ? 99999u : f->rx_ok;
+        unsigned cr = f->rx_crc_err > 999u ? 999u : f->rx_crc_err;
+        unsigned lo = f->rx_lost > 999u ? 999u : f->rx_lost;
+        snprintf(line, sizeof(line), "K%u C%u L%u", ok, cr, lo);
+        GFX_DrawString(x, y + 44, line, GFX_COLOR_WHITE);
+    }
+
+    /* ── 底部: 累积位移 (cm, 1 位小数) ── */
+    Flow_FmtCm(s1, sizeof(s1), pxcm);
+    Flow_FmtCm(s2, sizeof(s2), pycm);
+    snprintf(line, sizeof(line), "PX %s PY %scm", s1, s2);
+    GFX_DrawString(x, y + 52, line, GFX_COLOR_WHITE);
 }
