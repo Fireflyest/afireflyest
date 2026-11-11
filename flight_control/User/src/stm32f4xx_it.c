@@ -213,6 +213,42 @@ void USART2_IRQHandler(void) {
         esRxStatusUart2 = ES_RX_STATE_COMPLETE;
 }
 
+/* USART6: GPS / 北斗模块 NMEA 接收 (PA11 TX / PA12 RX)
+ * 只收字节进环形缓冲, 组句与解析都在主循环 GPS_Update() 里做。
+ * 注意 DR 只读一次: 读 DR 会同时清 RXNE/ORE/FE/NE/PE,
+ * 重复读会拿到旧数据 (USART2 里为了清 IDLE 才多读了那一次)。
+ *
+ * ORE 与其他错误要区别对待:
+ *   ORE = 之前有字节被覆盖丢了 (主循环忙 OLED 刷屏), 现在 RDR 里这个
+ *         字节本身仍可能是好的 → 必须保留, 否则整条数据流错位
+ *   FE/NE/PE = 当前字节本身坏 (帧错/噪声/校验错) → 才丢弃 */
+void USART6_IRQHandler(void) {
+    uint16_t sr = USART6->SR;
+
+    if (sr & USART_FLAG_RXNE) {
+        uint8_t ch = (uint8_t)USART6->DR;   /* 读 DR: 清 RXNE 并顺带清 ORE */
+        GPS_RawIsr();                       /* 线上真实到字节 (好坏都算) */
+        if (sr & (USART_FLAG_FE | USART_FLAG_NE | USART_FLAG_PE)) {
+            /* FE 且数据全 0: 这一帧的 8 个数据位和停止位都被采样为 0,
+             * 即整个帧时间内 RX 引脚都是低电平 (UART 正常空闲应为高) */
+            if ((sr & USART_FLAG_FE) && ch == 0x00u) {
+                GPS_BreakIsr();
+            }
+            GPS_LineErrorIsr();
+        } else {
+            GPS_RxIsr(ch);
+        }
+        if (sr & USART_FLAG_ORE) {
+            GPS_OverrunIsr();   /* 有字节丢了, 但 ch 已收下 */
+        }
+    } else if (sr & (USART_FLAG_FE | USART_FLAG_NE | USART_FLAG_ORE | USART_FLAG_PE)) {
+        /* 只有错误没有数据: 读 SR+DR 清标志 */
+        (void)USART6->SR;
+        (void)USART6->DR;
+        GPS_LineErrorIsr();
+    }
+}
+
 void DMA1_Stream6_IRQHandler(void) {
     if (DMA_GetITStatus(DMA1_Stream6, DMA_IT_TCIF6)) {
         DMA_ClearITPendingBit(DMA1_Stream6, DMA_IT_TCIF6);

@@ -41,6 +41,8 @@
 #include "navigator.h"
 #include "ble.h"
 #include "extra_sensor.h"
+#include "flow.h"
+#include "gps.h"
 #include "dma.h"
 #include "pwm.h"
 // #include "icm20948.h"

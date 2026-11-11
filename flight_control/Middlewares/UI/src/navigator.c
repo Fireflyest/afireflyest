@@ -1,5 +1,6 @@
 #include "navigator.h"
 #include "flow.h"
+#include "gps.h"
 #include <string.h>
 #include <math.h>
 
@@ -16,6 +17,7 @@ static void UI_Mag_Calib_Draw(UI_Widget* widget);
 static void UI_MagDbg_Draw(UI_Widget* widget);
 static void UI_Battery_Draw(UI_Widget* widget);
 static void UI_Flow_Draw(UI_Widget* widget);
+static void UI_Gps_Draw(UI_Widget* widget);
 
 static UI_Window mpuWindow;
 static UI_Window pidWindow;
@@ -27,6 +29,7 @@ static UI_Window magDbgWindow;
 static UI_Window cubeWindow;
 static UI_Window batteryWindow;
 static UI_Window flowWindow;
+static UI_Window gpsWindow;
 
 
 void Window_Init(void) {
@@ -77,6 +80,10 @@ void Window_Init(void) {
     UI_Window_Init(&flowWindow, 0, 0, 128, 64);
     flowWindow.base.draw = UI_Flow_Draw;
     widgets[WINDOW_FLOW] = (UI_Widget*)&flowWindow;
+
+    UI_Window_Init(&gpsWindow, 0, 0, 128, 64);
+    gpsWindow.base.draw = UI_Gps_Draw;
+    widgets[WINDOW_GPS] = (UI_Widget*)&gpsWindow;
 }
 
 uint8_t Window_Current(void) {
@@ -693,4 +700,276 @@ static void UI_Flow_Draw(UI_Widget* widget)
     Flow_FmtCm(s2, sizeof(s2), pycm);
     snprintf(line, sizeof(line), "PX %s PY %scm", s1, s2);
     GFX_DrawString(x, y + 52, line, GFX_COLOR_WHITE);
+}
+
+/* ── WINDOW_GPS: NMEA 定位信息 (USART6) ─────────────────────────────
+ *
+ *  8 行 × 8px 铺满 64 像素 (6x8 字体), 每行最多 21 字符:
+ *    FIX 3D Q1 S 23     定位模式(3D/2D/NO) / GGA 质量 / 使用卫星数
+ *    LA 22.676927       纬度 (度, 6 位小数; 无效时 --)
+ *    LO 113.997752      经度
+ *    AL  96.5m H0.7     海拔(MSL) / HDOP
+ *    SP  0.16 CR 123    地速 m/s / 航迹向(真北 °)
+ *    UTC 02:36:56
+ *    DAT 2024-03-14
+ *    ANTENNA OPEN       模块 TXT 消息与统计行交替显示 (2s)
+ *
+ *  速率只有 1Hz: 采样值可能"跳变", 属正常。
+ */
+
+/* 微度 -> "[-]d.dddddd" (手工拆整数/小数, 不用浮点 printf) */
+static void Gps_FmtUdeg(char *out, int outSize, int32_t udeg)
+{
+    int32_t a = (udeg < 0) ? -udeg : udeg;
+
+    snprintf(out, outSize, "%s%ld.%06ld", (udeg < 0) ? "-" : "",
+             (long)(a / 1000000), (long)(a % 1000000));
+}
+
+/* 有符号 1 位小数 (alt / hdop 共用) */
+static void Gps_Fmt1(char *out, int outSize, float v)
+{
+    int neg = (v < 0.0f);
+    float a = neg ? -v : v;
+    int ip, fp;
+
+    if (a > 9999.0f) {
+        a = 9999.0f;
+    }
+    ip = (int)a;
+    fp = (int)((a - (float)ip) * 10.0f + 0.5f);
+    if (fp >= 10) {
+        fp = 0;
+        ip++;
+    }
+    snprintf(out, outSize, "%s%d.%d", neg ? "-" : "", ip, fp);
+}
+
+static void UI_Gps_Draw(UI_Widget* widget)
+{
+    char line[24];
+    char b1[16], b2[16];
+    const gps_data_t *g = GPS_Get();
+    const int x = widget->x + 2;
+    const int y = widget->y;    /* 8 行 × 8px = 64, 正好占满 */
+    const int lh = 8;
+
+    /* ══ 无有效语句: 显示接收诊断页 ══
+     *
+     * 每一项都是实测计数:
+     *   BAUD        当前 MCU 侧接收波特率 (短按可切换)
+     *   RAW /s      ★线上收到的全部字节速率, 含帧错字节
+     *               这是判断"模块以多快在发"的唯一依据
+     *   OK /s       其中成功组帧(无 FE/NE/PE)的字节速率
+     *   A%          OK 字节里落在 0x20~0x7E 的占比
+     *   H%          OK 字节里 bit7=1 的占比
+     *   I%          OK 字节里"取反后是 ASCII"的占比
+     *   $ / E       收到 '$' 的个数 / 校验和错误数
+     *   R           带 FE/NE/PE 的字节数
+     *   BR          其中 FE 且数据=0x00 的次数 (整帧被采成低电平)
+     *   O / K       硬件 ORE / 环形缓冲溢出
+     *
+     * 长按 800ms 回环自检 / 长按 2500ms 回 log 页 */
+    if (!g->link_ok) {
+        unsigned rate = g->rx_raw_bps > 99999u ? 99999u : g->rx_raw_bps;
+        unsigned ok = g->rx_bps > 99999u ? 99999u : g->rx_bps;
+        unsigned a = GPS_AsciiRatio();
+        unsigned h = GPS_HiBitRatio();
+        unsigned iv = GPS_InvRatio();
+        unsigned d = g->rx_dollar > 9999u ? 9999u : g->rx_dollar;
+        unsigned e = g->rx_bad_csum > 999u ? 999u : g->rx_bad_csum;
+        unsigned r = g->rx_line_err > 999u ? 999u : g->rx_line_err;
+        unsigned br = g->rx_break > 999u ? 999u : g->rx_break;
+        unsigned o = g->rx_hw_ovr > 99u ? 99u : g->rx_hw_ovr;
+        unsigned k = g->rx_overrun > 99u ? 99u : g->rx_overrun;
+
+        snprintf(line, sizeof(line), "GPS NO DATA %u", (unsigned)GPS_GetBaudrate());
+        GFX_DrawString(x, y + 0 * lh, line, GFX_COLOR_WHITE);
+
+        /* RAW: 线上全部字节速率 (含坏字节) */
+        snprintf(line, sizeof(line), "RAW %u/s", rate);
+        GFX_DrawString(x, y + 1 * lh, line, GFX_COLOR_WHITE);
+
+        /* OK: 成功组帧的字节速率 + ASCII 占比 */
+        snprintf(line, sizeof(line), "OK %u/s A%u%%", ok, a);
+        GFX_DrawString(x, y + 2 * lh, line, GFX_COLOR_WHITE);
+
+        snprintf(line, sizeof(line), "H%u%% I%u%% $%u", h, iv, d);
+        GFX_DrawString(x, y + 3 * lh, line, GFX_COLOR_WHITE);
+
+        snprintf(line, sizeof(line), "E%u R%u BR%u", e, r, br);
+        GFX_DrawString(x, y + 4 * lh, line, GFX_COLOR_WHITE);
+
+        snprintf(line, sizeof(line), "O%u K%u", o, k);
+        GFX_DrawString(x, y + 5 * lh, line, GFX_COLOR_WHITE);
+
+        {
+            uint8_t lb = GPS_LoopbackResult();
+            const char *lbs = (lb == 1u) ? "OK" :
+                              (lb == 2u) ? "NONE" :
+                              (lb == 3u) ? "BAD" : "--";
+            snprintf(line, sizeof(line), "LB:%s F:%02X%02X%02X%02X", lbs,
+                     g->raw[4], g->raw[5], g->raw[6], g->raw[7]);
+        }
+        GFX_DrawString(x, y + 6 * lh, line, GFX_COLOR_WHITE);
+
+        /* 结论: 只按实测比值分支, 不外推硬件 */
+        if (rate == 0u) {
+            snprintf(line, sizeof(line), "NO BYTES ON RX");
+        } else if (ok > 0u && iv >= 80u && a <= 10u) {
+            snprintf(line, sizeof(line), "DATA IS INVERTED");
+        } else if (r > 0u && br > 0u && br >= r / 2u) {
+            snprintf(line, sizeof(line), "RX PIN HELD LOW");
+        } else if (a >= 80u && d > 0u) {
+            snprintf(line, sizeof(line), "TEXT BUT NO CRC");
+        } else if (a < 50u) {
+            snprintf(line, sizeof(line), "NOT ASCII DATA");
+        } else if (d == 0u) {
+            snprintf(line, sizeof(line), "NO $ IN DATA");
+        } else if (r > 0u || o > 0u || k > 0u) {
+            snprintf(line, sizeof(line), "BYTES DROPPED");
+        } else {
+            snprintf(line, sizeof(line), "CHECKSUM FAIL");
+        }
+        GFX_DrawString(x, y + 7 * lh, line, GFX_COLOR_WHITE);
+        return;
+    }
+
+    /* 行 0: 定位模式 / 质量 / 卫星数
+     *   U = GGA 字段 7: 模块解算时实际用了几颗星
+     *   V = 各星座 GSV 字段 3 之和: 跟踪到的可见星数
+     *
+     * ★ 这两个数来自不同语句, 不存在"U <= V"的必然关系, 所以不用 a/b 形式:
+     *   - GGA 可能是全系统合计 (如 $GNGGA 报 23)
+     *   - GSV 是分星座上报, 求和后可能少于 GGA 的值
+     *   要看明细请等第 7 行轮换到星座拆分 (如 "GP8 BD14") */
+    snprintf(line, sizeof(line), "FIX %s Q%u U%u V%u", GPS_FixStr(),
+             (unsigned)g->fix_quality, (unsigned)g->sats_used,
+             (unsigned)g->sats_in_view);
+    GFX_DrawString(x, y + 0 * lh, line, GFX_COLOR_WHITE);
+
+    /* 行 1-2: 经纬度 (度, 6 位小数; S/W 用负号表示) */
+    if (g->pos_valid) {
+        Gps_FmtUdeg(b1, sizeof(b1), g->lat_udeg);
+        snprintf(line, sizeof(line), "LA %s", b1);
+    } else {
+        snprintf(line, sizeof(line), "LA --");
+    }
+    GFX_DrawString(x, y + 1 * lh, line, GFX_COLOR_WHITE);
+
+    if (g->pos_valid) {
+        Gps_FmtUdeg(b1, sizeof(b1), g->lon_udeg);
+        snprintf(line, sizeof(line), "LO %s", b1);
+    } else {
+        snprintf(line, sizeof(line), "LO --");
+    }
+    GFX_DrawString(x, y + 2 * lh, line, GFX_COLOR_WHITE);
+
+    /* 行 3: 海拔 (MSL) + HDOP */
+    if (g->has_alt) {
+        Gps_Fmt1(b1, sizeof(b1), g->alt_m);
+        Gps_Fmt1(b2, sizeof(b2), g->hdop);
+        snprintf(line, sizeof(line), "AL %sm H%s", b1, b2);
+    } else {
+        snprintf(line, sizeof(line), "AL --");
+    }
+    GFX_DrawString(x, y + 3 * lh, line, GFX_COLOR_WHITE);
+
+    /* 行 4: 地速 (m/s, 2 位小数) + 航迹向 */
+    {
+        char sp[8], cr[6];
+        if (g->has_speed) {
+            int cms = (int)(g->speed_mps * 100.0f + 0.5f);
+            if (cms < 0) {
+                cms = 0;
+            }
+            if (cms > 99999) {
+                cms = 99999;
+            }
+            snprintf(sp, sizeof(sp), "%d.%02d", cms / 100, cms % 100);
+        } else {
+            snprintf(sp, sizeof(sp), "--");
+        }
+        if (g->has_course) {
+            int cd = (int)(g->course_deg + 0.5f) % 360;
+            snprintf(cr, sizeof(cr), "%d", cd);
+        } else {
+            snprintf(cr, sizeof(cr), "--");
+        }
+        snprintf(line, sizeof(line), "SP %5s CR %3s", sp, cr);
+    }
+    GFX_DrawString(x, y + 4 * lh, line, GFX_COLOR_WHITE);
+
+    /* 行 5: UTC + 本地时间并排
+     * NMEA 的时间字段恒为 UTC, 与模块装在哪个时区无关。
+     * 本地时间 = UTC + GPS_LOCAL_TZ_HOURS (中国大陆 +8)。
+     * 例: 本地晚上 22:05 -> 屏幕 "UTC14:05 CST22:05" 是正常的
+     *     若 CST 后的小时与你手机不一致, 才是时区/时钟问题 */
+    if (g->has_time) {
+        int32_t sec = (int32_t)g->hour * 3600 + g->minute * 60 + g->second;
+        int32_t lsec = sec + (int32_t)GPS_LOCAL_TZ_HOURS * 3600;
+        unsigned lh, lm;
+
+        while (lsec >= 86400) {
+            lsec -= 86400;
+        }
+        while (lsec < 0) {
+            lsec += 86400;
+        }
+        lh = (unsigned)(lsec / 3600);
+        lm = (unsigned)((lsec % 3600) / 60);
+
+        snprintf(line, sizeof(line), "UTC%02u:%02u %s%02u:%02u",
+                 (unsigned)g->hour, (unsigned)g->minute,
+                 GPS_LOCAL_TZ_LABEL, lh, lm);
+    } else {
+        snprintf(line, sizeof(line), "UTC--:-- %s--:--", GPS_LOCAL_TZ_LABEL);
+    }
+    GFX_DrawString(x, y + 5 * lh, line, GFX_COLOR_WHITE);
+
+    /* 行 6: 无日期时显示 卫星峰值 + 各类语句累计条数
+     *   PK = 上电/清零以来视野内可见卫星数的峰值 (户外看这个涨不涨)
+     *   R  = RMC 条数   G = GGA 条数   P = GSV 分页数
+     * 判读: PK 涨到 8 以上 -> 能收到卫星信号
+     *       PK 一直是 0     -> 还没跟踪到任何卫星 */
+    if (g->has_date) {
+        unsigned pk = g->sats_in_view_max;
+        snprintf(line, sizeof(line), "DAT %04u-%02u-%02u PK%u",
+                 (unsigned)g->year, (unsigned)g->month, (unsigned)g->day, pk);
+    } else {
+        unsigned pk = g->sats_in_view_max;
+        unsigned nrmc = g->n_rmc > 999u ? 999u : g->n_rmc;
+        unsigned ngga = g->n_gga > 999u ? 999u : g->n_gga;
+        unsigned ngsv = g->n_gsv > 999u ? 999u : g->n_gsv;
+        snprintf(line, sizeof(line), "PK%u R%u G%u P%u", pk, nrmc, ngga, ngsv);
+    }
+    GFX_DrawString(x, y + 6 * lh, line, GFX_COLOR_WHITE);
+
+    /* 行 7: 每 2s 四态轮换
+     *   ① L/E/O 统计 + A(定位有效)/V(无效)
+     *   ② 各星座可见星数明细, 如 "GP8 BD14 GL0" —— 解释 U/V 的来源
+     *   ③ 最近一条 RMC 原文前 20 字符
+     *   ④ 最近一条 GGA 原文前 20 字符 */
+    {
+        unsigned phase = (unsigned)((systemTick / 2000u) % 4u);
+
+        if (phase == 0u || (!g->has_last_rmc && !g->has_last_gga)) {
+            unsigned l = g->rx_lines > 9999u ? 9999u : g->rx_lines;
+            unsigned e = g->rx_bad_csum > 99u ? 99u : g->rx_bad_csum;
+            unsigned o = g->rx_overrun > 99u ? 99u : g->rx_overrun;
+            snprintf(line, sizeof(line), "L%u E%u O%u %c", l, e, o,
+                     g->pos_valid ? 'A' : 'V');
+        } else if (phase == 1u) {
+            /* 最多 20 字符, 与 128px 宽 / 6px 字宽匹配 */
+            GPS_ViewBreakdown(line, 21u);
+        } else if (phase == 2u && g->has_last_rmc) {
+            snprintf(line, sizeof(line), "%.20s", g->last_rmc);
+        } else if (g->has_last_gga) {
+            snprintf(line, sizeof(line), "%.20s", g->last_gga);
+        } else {
+            unsigned l = g->rx_lines > 9999u ? 9999u : g->rx_lines;
+            snprintf(line, sizeof(line), "L%u", l);
+        }
+    }
+    GFX_DrawString(x, y + 7 * lh, line, GFX_COLOR_WHITE);
 }

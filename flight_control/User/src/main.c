@@ -7,6 +7,7 @@
 #include "battery.h"
 #include "navigator.h"
 #include "flow.h"
+#include "gps.h"
 
 
 
@@ -22,6 +23,26 @@ static int8_t MagCalib_StartSafe(void) {
         return -1;
     Attitude_StartMagCalibrate();
     return 0;
+}
+
+/**
+ * @brief GPS 接收波特率切换 (WINDOW_GPS 内短按)
+ * @note  默认值由 GPS_BAUDRATE_DEFAULT 决定 (当前 38400)。
+ *        切换后 GPS_SetBaudrate 会清空接收统计与环形缓冲,
+ *        所以每次切换等 1~2 秒再读数。诊断见 GPS 窗口 RAW/OK 两行。
+ */
+static void Gps_BaudNext(void) {
+    static const uint32_t table[] = { 38400u, 115200u, 9600u };
+    const uint32_t cur = GPS_GetBaudrate();
+    uint8_t next = 0u;
+
+    for (uint8_t i = 0u; i < (uint8_t)(sizeof(table) / sizeof(table[0])); i++) {
+        if (table[i] == cur) {
+            next = (uint8_t)((i + 1u) % (uint8_t)(sizeof(table) / sizeof(table[0])));
+            break;
+        }
+    }
+    GPS_SetBaudrate(table[next]);
 }
 
 /** @brief 二进制遥测包 (0xAA) 开关: 保持原有数据包不变;
@@ -176,6 +197,8 @@ int main() {
     UART1_GPIO_Init();
     UART2_GPIO_Init();
     Flow_Init(); /* 光流子板二进制协议解析器 */
+    UART6_GPIO_Init();
+    GPS_Init(GPS_BAUDRATE_DEFAULT); /* NMEA GPS/北斗 (USART6, 8N1) */
     BLE_Init(BLE_BAUDRATE_115200);
     ExtraSensor_Init(ES_BAUDRATE_115200);
     UI_Logger_AddLine(&logWindow, "UART Init OK");
@@ -273,7 +296,7 @@ int main() {
     Command_SetRollOLCallback(Control_RollOpenLoopTest);
     Command_SetMagCalibCallback(MagCalib_StartSafe);
 
-    Window_To(WINDOW_FLOW); /* 默认显示 log 页 */
+    Window_To(WINDOW_GPS); /* 默认显示 log 页 */
 
     // TaskHandle_t xExampleTaskHandle = NULL;
     // ( void ) xTaskCreate( exampleTask,
@@ -369,6 +392,10 @@ int main() {
         }
         Flow_Update(); /* 200ms 无有效帧 -> link_ok=0 */
 
+        /* ── UART6 GPS: 排空环形缓冲并组句解析 (NMEA, 1Hz) ──
+         * 逐字节状态机 + 校验和, 不用 IDLE 成帧; 解析量小不阻塞主循环 */
+        GPS_Update();
+
         /* 每 10s 一行光流链路统计 (很安静):
          *   ok=有效帧 crc=CRC错误 lost=seq 估算丢帧 err=UART 线路错误 */
         if (systemTick - u2StatTick >= 10000u) {
@@ -399,7 +426,7 @@ int main() {
                 status_buf[3] = (uint8_t)Control_GetMode();
                 status_buf[4] = Control_IsArmed();
                 status_buf[5] = Battery_GetPercentage();
-                status_buf[6] = 0; // GPS 星数
+                status_buf[6] = GPS_Get()->sats_used; // GPS 星数
                 int16_t rssi = 0;
                 memcpy(&status_buf[7], &rssi, 2);
                 BLE_WriteData(status_buf, 32);
@@ -457,15 +484,20 @@ int main() {
             // GPS 包 (类型 0x03)，每 10 帧发送一次
             if (telemetry_tick % 10 == 0) {
                 uint8_t gps_buf[32] = {0};
+                const gps_data_t* gd = GPS_Get();
                 gps_buf[0] = 0xAA;
                 gps_buf[1] = 0x03;
 
-                // 纬度 (GPS 暂未接入，填 0)
-                double latitude = 0.0;
+                // 纬度 (度, 微度换算; 未定位时填 0)
+                double latitude = (gd->pos_valid && gd->lat_udeg != 0)
+                                      ? ((double)gd->lat_udeg / 1000000.0)
+                                      : 0.0;
                 memcpy(&gps_buf[2], &latitude, 8);
 
-                // 经度 (GPS 暂未接入，填 0)
-                double longitude = 0.0;
+                // 经度 (度; 未定位时填 0)
+                double longitude = (gd->pos_valid && gd->lon_udeg != 0)
+                                       ? ((double)gd->lon_udeg / 1000000.0)
+                                       : 0.0;
                 memcpy(&gps_buf[10], &longitude, 8);
 
                 // 高度 (气压计)
@@ -473,8 +505,8 @@ int main() {
                 Attitude_GetAltitude(&altitude);
                 memcpy(&gps_buf[18], &altitude, 4);
 
-                // 水平速度 (GPS 暂未接入，填 0)
-                float velocity = 0.0f;
+                // 水平速度 (GPS 地速 m/s)
+                float velocity = gd->has_speed ? gd->speed_mps : 0.0f;
                 memcpy(&gps_buf[22], &velocity, 4);
 
                 // Padding 已由初始化置零
@@ -492,31 +524,55 @@ int main() {
         }
 
         /* ── 按键 ──
-         * 普通: 按链表切换窗口 NONE→IMU→MAGDBG→CUBE→BATTERY→PID→FLOW→NONE
-         * WINDOW_FLOW 内: 短按 = 累积位置清零 (方便反复测试),
-         *                长按 800ms = 回到 WINDOW_NONE, 否则出不了该窗口 */
+         * 普通: 按链表切换窗口
+         *       NONE→IMU→MAGDBG→CUBE→BATTERY→PID→FLOW→GPS
+         * WINDOW_FLOW: 短按 = 累积位置清零, 长按 800ms = 切到 GPS
+         * WINDOW_GPS : 短按 = 切接收波特率 (115200 → 38400 → 9600)
+         *              长按 800ms  = 回环自检 (先短接 PA11/PA12)
+         *              长按 2500ms = 回到 log 页
+         * 记录 keyHoldTick 用于区分长按档位 */
         {
-            static uint32_t flowKeyDownTick = 0;
-            static uint8_t  flowKeyWasDown  = 0;
-            static uint8_t  flowLongFired   = 0;
+            static uint32_t keyDownTick = 0;
+            static uint8_t  keyWasDown  = 0;
+            static uint8_t  lvl800Fired = 0;
+            static uint8_t  lvl2500Fired = 0;
             uint8_t keyDown = (Key_Status() == KEY_STATE_PRESSED);
+            uint8_t win = Window_Current();
+            uint32_t held;
 
-            if (keyDown && !flowKeyWasDown) {
-                flowKeyDownTick = systemTick;
-                flowLongFired   = 0;
+            if (keyDown && !keyWasDown) {
+                keyDownTick = systemTick;
+                lvl800Fired = 0;
+                lvl2500Fired = 0;
             }
-            if (keyDown && !flowLongFired && Window_Current() == WINDOW_FLOW &&
-                (uint32_t)(systemTick - flowKeyDownTick) >= 800u) {
-                flowLongFired = 1;      /* 只触发一次, 松开前不重复 */
-                Window_To(WINDOW_NONE);
+            held = (uint32_t)(systemTick - keyDownTick);
+
+            if (keyDown) {
+                if (win == WINDOW_GPS) {
+                    if (!lvl2500Fired && held >= 2500u) {
+                        lvl2500Fired = 1;
+                        Window_To(WINDOW_NONE);
+                    } else if (!lvl800Fired && held >= 800u) {
+                        lvl800Fired = 1;
+                        GPS_LoopbackTest();   /* 需先短接 PA11 <-> PA12 */
+                    }
+                } else if (win == WINDOW_FLOW) {
+                    if (!lvl800Fired && held >= 800u) {
+                        lvl800Fired = 1;
+                        Window_To(WINDOW_GPS);
+                    }
+                }
             }
-            flowKeyWasDown = keyDown;
+            keyWasDown = keyDown;
         }
 
         if (Key_PressConsume()) {
             if (Window_Current() == WINDOW_FLOW) {
                 /* 光流窗口内: 短按清零累积位置 (长按已在上面的检测里切窗口) */
                 Flow_ResetPosition();
+            } else if (Window_Current() == WINDOW_GPS) {
+                /* GPS 窗口内: 短按切换接收波特率 (115200 -> 38400 -> 9600) */
+                Gps_BaudNext();
             } else if (Window_Current() == WINDOW_NONE) {
                 Window_To(WINDOW_IMU);
             } else if (Window_Current() == WINDOW_IMU) {
@@ -530,6 +586,7 @@ int main() {
             } else if (Window_Current() == WINDOW_PID) {
                 Window_To(WINDOW_FLOW);
             } else {
+                /* 其它窗口 -> 回到 log 页 */
                 Window_To(WINDOW_NONE);
             }
         }

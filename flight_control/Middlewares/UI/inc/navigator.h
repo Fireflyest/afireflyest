@@ -26,6 +26,7 @@
 #define WINDOW_BATTERY           8
 #define WINDOW_MAGDBG            9
 #define WINDOW_FLOW              10
+#define WINDOW_GPS               11
 
 extern UI_Logger logWindow;
 
